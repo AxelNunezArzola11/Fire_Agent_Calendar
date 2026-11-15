@@ -1,0 +1,45 @@
+{
+  "datasets": [
+    {
+      "dataset_id": "modis-2023-USA",
+      "source_rows": 94000,
+      "accepted": 94000,
+      "rejected": 0,
+      "parquet_files": 12,
+      "catalog_versions": 1,
+      "seconds": 88.5
+    },
+    {
+      "dataset_id": "viirs-snpp-2023-USA",
+      "source_rows": 388672,
+      "accepted": 388672,
+      "rejected": 0,
+      "parquet_files": 12,
+      "catalog_versions": 1,
+      "seconds": 458.7
+    }
+  ],
+  "elapsed_s": 564.0,
+  "california_crosscheck": {
+    "modis": {
+      "ca_rows": 7954,
+      "total_rows": 94000
+    },
+    "viirs-snpp": {
+      "ca_rows": 36344,
+      "total_rows": 388672
+    }
+  },
+  "duckdb_datasets": [
+    {
+      "product": "modis",
+      "sensor": "terra_aqua",
+      "rows": 94000
+    },
+    {
+      "product": "viirs-snpp",
+      "sensor": "snpp",
+      "rows": 388672
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+# FireAgent Calendar — Streamlit Community Cloud requirements.
+# Entrypoint: calendar_app.py | Python 3.11 (verified: local .venv 3.11.4).
+# Pins equal the observed local working set (requirements-calendar.txt).
+# Test-only packages (pytest, xgboost) are intentionally excluded: the cloud
+# installs runtime dependencies only. Full test runs stay local.
+duckdb==2.0.0
+streamlit==1.67.0
+streamlit-folium==0.27.4
+folium==0.20.0
+pandas==3.1.1
+pyarrow==26.0.1
+numpy==2.4.6
+requests==2.34.2
+python-dotenv==1.2.4
+rasterio==1.4.4

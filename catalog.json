@@ -1,0 +1,146 @@
+{
+  "catalog_version": 1,
+  "datasets": [
+    {
+      "dataset_id": "modis-2023-USA",
+      "versions": [
+        {
+          "coverage": {
+            "geographic": {
+              "lat_max": 68.2016,
+              "lat_min": 19.1496,
+              "lon_max": -67.3794,
+              "lon_min": -164.0724
+            },
+            "temporal": {
+              "max": "2023-12-31T20:50:00+00:00",
+              "min": "2023-01-01T18:19:00+00:00"
+            }
+          },
+          "parquet_files": [
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=modis/sensor=terra_aqua/year=2023/month=01/part-12d84990.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=modis/sensor=terra_aqua/year=2023/month=02/part-492d49f1.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=modis/sensor=terra_aqua/year=2023/month=03/part-c36e0605.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=modis/sensor=terra_aqua/year=2023/month=04/part-fc1bb55d.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=modis/sensor=terra_aqua/year=2023/month=05/part-1bef1209.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=modis/sensor=terra_aqua/year=2023/month=06/part-da6df779.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=modis/sensor=terra_aqua/year=2023/month=07/part-82f24279.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=modis/sensor=terra_aqua/year=2023/month=08/part-d5fe7354.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=modis/sensor=terra_aqua/year=2023/month=09/part-a38912c9.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=modis/sensor=terra_aqua/year=2023/month=10/part-ff0621a7.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=modis/sensor=terra_aqua/year=2023/month=11/part-c0f349ea.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=modis/sensor=terra_aqua/year=2023/month=12/part-ad8bfd3a.parquet"
+          ],
+          "processed_at": "2026-11-12T01:38:59.236677+00:00",
+          "processing_version": "cal_norm_v1",
+          "quality": {
+            "accepted_rows": 94000,
+            "duplicate_detection_ids": 0,
+            "geographic_coverage": {
+              "lat_max": 68.2016,
+              "lat_min": 19.1496,
+              "lon_max": -67.3794,
+              "lon_min": -164.0724
+            },
+            "null_confidence": 0,
+            "null_frp": 0,
+            "rejected_reasons": {},
+            "rejected_rows": 0,
+            "sensor_distribution": {
+              "Aqua": 51287,
+              "Terra": 42713
+            },
+            "source_rows": 94000,
+            "temporal_coverage": {
+              "max": "2023-12-31T20:50:00+00:00",
+              "min": "2023-01-01T18:19:00+00:00"
+            }
+          },
+          "raw_files": [
+            {
+              "path": "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/data_raw_firms/modis/terra_aqua/open-archive-2023-United_States/modis_2023_United_States.csv",
+              "sha256": "8f693b80488414db0494deac1081f4c658769618100e402a830fb823f8f6ec1f",
+              "size_bytes": 7572283
+            }
+          ],
+          "record_counts": {
+            "accepted": 94000,
+            "rejected": 0,
+            "source": 94000
+          },
+          "validation_status": "valid"
+        }
+      ]
+    },
+    {
+      "dataset_id": "viirs-snpp-2023-USA",
+      "versions": [
+        {
+          "coverage": {
+            "geographic": {
+              "lat_max": 70.49563,
+              "lat_min": 18.91701,
+              "lon_max": -66.98772,
+              "lon_min": -169.95404
+            },
+            "temporal": {
+              "max": "2023-12-31T21:01:00+00:00",
+              "min": "2023-01-01T06:39:00+00:00"
+            }
+          },
+          "parquet_files": [
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=viirs-snpp/sensor=snpp/year=2023/month=01/part-e52de488.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=viirs-snpp/sensor=snpp/year=2023/month=02/part-fe822288.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=viirs-snpp/sensor=snpp/year=2023/month=03/part-c4f209d6.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=viirs-snpp/sensor=snpp/year=2023/month=04/part-0f78be95.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=viirs-snpp/sensor=snpp/year=2023/month=05/part-7ec8c09e.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=viirs-snpp/sensor=snpp/year=2023/month=06/part-9c58a2b9.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=viirs-snpp/sensor=snpp/year=2023/month=07/part-71384906.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=viirs-snpp/sensor=snpp/year=2023/month=08/part-c675e326.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=viirs-snpp/sensor=snpp/year=2023/month=09/part-be3da943.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=viirs-snpp/sensor=snpp/year=2023/month=10/part-713699da.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=viirs-snpp/sensor=snpp/year=2023/month=11/part-d5966166.parquet",
+            "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/normalized_parquet/cal_norm_v1/product=viirs-snpp/sensor=snpp/year=2023/month=12/part-715dd351.parquet"
+          ],
+          "processed_at": "2026-11-12T01:46:37.908233+00:00",
+          "processing_version": "cal_norm_v1",
+          "quality": {
+            "accepted_rows": 388672,
+            "duplicate_detection_ids": 0,
+            "geographic_coverage": {
+              "lat_max": 70.49563,
+              "lat_min": 18.91701,
+              "lon_max": -66.98772,
+              "lon_min": -169.95404
+            },
+            "null_confidence": 0,
+            "null_frp": 0,
+            "rejected_reasons": {},
+            "rejected_rows": 0,
+            "sensor_distribution": {
+              "N": 388672
+            },
+            "source_rows": 388672,
+            "temporal_coverage": {
+              "max": "2023-12-31T21:01:00+00:00",
+              "min": "2023-01-01T06:39:00+00:00"
+            }
+          },
+          "raw_files": [
+            {
+              "path": "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/data_raw_firms/viirs-snpp/snpp/open-archive-2023-United_States/viirs-snpp_2023_United_States.csv",
+              "sha256": "d419abfb7d39d8040fd4487aee7e8003b1940ae5eb0cd95aa244cd7e303d4b4d",
+              "size_bytes": 30962191
+            }
+          ],
+          "record_counts": {
+            "accepted": 388672,
+            "rejected": 0,
+            "source": 388672
+          },
+          "validation_status": "valid"
+        }
+      ]
+    }
+  ]
+}

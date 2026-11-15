@@ -1,0 +1,33 @@
+# FireAgent original dashboard (app.py) dependency set — preserved 2026-11-14.
+# This file keeps the pre-deployment root requirements.txt content verbatim
+# (it targeted the dashboard entrypoint app.py). The root requirements.txt now
+# targets the FireAgent Calendar entrypoint (calendar_app.py) for Streamlit
+# Community Cloud. Install this file only for local dashboard work:
+#   pip install -r requirements-dashboard.txt
+# Tested with Python 3.10, 3.11, 3.12 (Streamlit Cloud defaults to 3.11)
+streamlit>=1.32
+folium>=0.16
+streamlit-folium>=0.20
+pandas>=2.1
+requests>=2.31
+ibm-watsonx-ai>=1.0
+python-dotenv>=1.0
+shapely>=2.0
+# numpy 2.x is supported by all current dependencies (scikit-learn 1.3+,
+# shap 0.49+, xgboost 2+). The old <2.0 cap forced pip to downgrade shap.
+numpy>=1.26
+scipy>=1.11
+scikit-learn>=1.3
+xgboost>=2.0
+shap>=0.45
+# Land Cover tab — computer-vision pipeline
+# torch and torchvision on PyPI (pypi.org) ship CPU-only wheels for Linux
+# x86_64 since torch 2.1 — no --index-url override required for cloud deploys.
+torch>=2.0
+torchvision>=0.15
+Pillow>=9.0
+rasterio>=1.3
+earthaccess>=0.9
+matplotlib>=3.7
+aiohttp>=3.9
+fsspec>=2024.2

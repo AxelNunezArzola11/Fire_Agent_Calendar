@@ -1,0 +1,79 @@
+{
+  "inputs": {
+    "match_exec": "bfef579ade4b4e368eef12732573137a",
+    "cluster_exec": "7caf584581684169820505f8b73672aa",
+    "n_input_duckdb": 482672
+  },
+  "sensor_view": {
+    "modis": {
+      "raw_observations": 94000,
+      "matched_members": 52044,
+      "ambiguous_members": 18161,
+      "singletons": 23795,
+      "frp_sum": 4300943.9,
+      "frp_n": 94000,
+      "frp_missing": 0
+    },
+    "viirs-snpp": {
+      "raw_observations": 388672,
+      "matched_members": 128250,
+      "ambiguous_members": 59134,
+      "singletons": 201288,
+      "frp_sum": 3297131.9,
+      "frp_n": 388672,
+      "frp_missing": 0
+    }
+  },
+  "harmonized_view": {
+    "matched_groups": 44424,
+    "ambiguous_members": 77295,
+    "singletons": 225083,
+    "harmonized_observations": 346802,
+    "matching_composition": {
+      "VIIRS-only": 201288,
+      "matched": 180294,
+      "ambiguous": 77295,
+      "MODIS-only": 23795
+    },
+    "clusters": 137640,
+    "cluster_size_min": 1,
+    "cluster_size_max": 3872,
+    "cluster_size_mean": 3.51
+  },
+  "reconciliation": {
+    "passed": true,
+    "checks": [
+      {
+        "check": "members-cover-inputs",
+        "passed": true,
+        "detail": "members=482672 inputs=482672"
+      },
+      {
+        "check": "matched-members-reference-groups",
+        "passed": true,
+        "detail": "matched=180294 groups=44424"
+      },
+      {
+        "check": "membership-covers-inputs-once",
+        "passed": true,
+        "detail": "membership=482672"
+      },
+      {
+        "check": "membership-links-clusters",
+        "passed": true,
+        "detail": "clusters=137640"
+      },
+      {
+        "check": "cluster-sizes-sum-to-inputs",
+        "passed": true,
+        "detail": "sum=482672"
+      }
+    ]
+  },
+  "composite": {
+    "formula": "index = w_det*(det/det_baseline) + w_clu*(clu/clu_baseline) + w_frp*(frp/frp_baseline); weights unset (see composite_index)",
+    "status": "not-computed (no approved weights)"
+  },
+  "algo_version": "dual_index_v1",
+  "exec_id": "15bee7bd8c7947319f5a98d069f952c3"
+}

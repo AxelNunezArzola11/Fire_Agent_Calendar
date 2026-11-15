@@ -1,0 +1,53 @@
+{
+  "year": 2023,
+  "country": "United_States",
+  "files": [
+    {
+      "filename": "modis_2023_United_States.csv",
+      "product": "modis",
+      "sensor": "terra_aqua",
+      "size_bytes": 7572283,
+      "sha256": "8f693b80488414db0494deac1081f4c658769618100e402a830fb823f8f6ec1f",
+      "raw_path": "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/data_raw_firms/modis/terra_aqua/open-archive-2023-United_States/modis_2023_United_States.csv",
+      "status": "registered",
+      "seconds": 5.4
+    },
+    {
+      "filename": "viirs-snpp_2023_United_States.csv",
+      "product": "viirs-snpp",
+      "sensor": "snpp",
+      "size_bytes": 30962191,
+      "sha256": "d419abfb7d39d8040fd4487aee7e8003b1940ae5eb0cd95aa244cd7e303d4b4d",
+      "raw_path": "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/data_raw_firms/viirs-snpp/snpp/open-archive-2023-United_States/viirs-snpp_2023_United_States.csv",
+      "status": "registered",
+      "seconds": 10.6
+    }
+  ],
+  "capacity": {
+    "free_bytes": 37548875776,
+    "band": "High",
+    "needed_bytes": 77068948,
+    "reserve_bytes": 2147483648
+  },
+  "probes": {
+    "modis": {
+      "published": true,
+      "size": 7572283,
+      "mtime": "Mon, 03 Jun 2024 18:12:29 GMT",
+      "etag": "\"bffdfd58f994a5bedf320cb1eac22dc4\""
+    },
+    "viirs-snpp": {
+      "published": true,
+      "size": 30962191,
+      "mtime": "Tue, 24 Jun 2025 17:11:32 GMT",
+      "etag": "\"59624098ceb000f8a7d3444ab8855ade\""
+    }
+  },
+  "backup": {
+    "copied": 2,
+    "skipped": 0,
+    "failed": 0
+  },
+  "elapsed_s": 19.0,
+  "free_bytes_after": 37433184256
+}

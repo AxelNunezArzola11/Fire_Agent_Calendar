@@ -1,0 +1,71 @@
+# ── Credentials / Secrets (never commit) ────────────────────────────────────
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+crede.txt
+*credentials*.json
+*token*.json
+
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# ── Virtual environments ────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Databases (regenerable local caches; never commit) ──────────────────────
+*.sqlite
+*.sqlite-*
+*.db
+*.duckdb
+*.duckdb.wal
+wildfire_cache.db
+ops.sqlite
+calendar_events.sqlite*
+calendar.duckdb
+
+# ── Datasets (large / regenerable via the pipeline scripts) ─────────────────
+*.parquet
+data_raw_firms/
+normalized_parquet/
+backup_mirror/
+l2_data/
+data/
+elephant-goldfish-model/
+pilot_outputs/
+reports/
+analytics_runs.jsonl
+analytics_output/*
+!analytics_output/9741f859517c418fa15ff6b6cbe078e2/
+!analytics_output/15bee7bd8c7947319f5a98d069f952c3/
+analytics_output/9741f859517c418fa15ff6b6cbe078e2/*
+!analytics_output/9741f859517c418fa15ff6b6cbe078e2/metrics_2d.json
+analytics_output/15bee7bd8c7947319f5a98d069f952c3/*
+!analytics_output/15bee7bd8c7947319f5a98d069f952c3/index_2e.json
+
+# ── Test / tooling caches ───────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ── Logs & temporary outputs ────────────────────────────────────────────────
+*.log
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# ── Training data (legacy dashboard; not source code) ───────────────────────
+data/eurosat/
+data/patches_angola/
