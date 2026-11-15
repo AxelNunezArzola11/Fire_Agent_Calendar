@@ -643,3 +643,89 @@ def test_12_export_refuses_misleading_output_when_source_unavailable(tmp_path, m
         assert any("export unavailable" in w.lower() for w in fake.warnings)
         assert fake.download_buttons == []
         assert fake.metrics == []
+
+
+def test_13_events_db_gz_bootstraps_when_sqlite_absent(tmp_path, monkeypatch):
+    import gzip
+
+    src_db = tmp_path / "src_events.sqlite"
+    conn = events_store.connect(str(src_db))
+    events_store.init_schema(conn)
+    conn.close()
+
+    target_db = tmp_path / "calendar_events.sqlite"
+    gz_db = tmp_path / "calendar_events.sqlite.gz"
+    gz_db.write_bytes(gzip.compress(src_db.read_bytes()))
+    src_db.unlink()
+    assert not target_db.exists()
+
+    monkeypatch.setattr(settings, "CAL_EVENTS_DB_PATH", str(target_db))
+    status = query.events_db_status()
+    assert status["available"] is True
+    assert status["status"] == "ok"
+    assert target_db.is_file()
+    assert events_view._db_ok() is True
+
+
+def test_14_duckdb_relocated_parquet_view_recovers(tmp_path, monkeypatch):
+    import shutil
+    import pandas as pd
+    from src.calendar.processing import duckdb_layer
+
+    old_root = tmp_path / "old_checkout" / "normalized_parquet"
+    parquet_dir = (
+        old_root
+        / "cal_norm_v1"
+        / "product=modis"
+        / "sensor=terra_aqua"
+        / "year=2023"
+        / "month=08"
+    )
+    parquet_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "detection_id": "det-reloc-1",
+                "satellite": "Terra",
+                "instrument": "MODIS",
+                "acquisition_timestamp_utc": "2023-08-01T18:00:00Z",
+                "latitude": 39.5,
+                "longitude": -121.2,
+                "confidence": "85",
+                "frp": 31.4,
+                "daynight": "D",
+                "acq_date_utc": "2023-08-01",
+            }
+        ]
+    ).to_parquet(parquet_dir / "part-test.parquet", index=False)
+
+    # Create writable and read-only DuckDB files pointing at old_root, then relocate Parquet
+    stale_db = tmp_path / "calendar.duckdb"
+    stale_ro = tmp_path / "ro" / "calendar.duckdb"
+    stale_ro.parent.mkdir(parents=True)
+    duckdb_layer.init_db(str(stale_db), str(old_root))
+    duckdb_layer.init_db(str(stale_ro), str(old_root))
+
+    new_root = tmp_path / "new_checkout" / "normalized_parquet"
+    new_root.parent.mkdir(parents=True)
+    shutil.move(str(old_root), str(new_root))
+
+    monkeypatch.setattr(settings, "PARQUET_ROOT", str(new_root))
+    monkeypatch.setattr(settings, "CAL_DUCKDB_PATH", str(stale_db))
+
+    # Writable DB refreshes in place
+    st_writable = query.duckdb_status()
+    assert st_writable["available"] is True
+    assert st_writable["status"] == "ok"
+    assert query.count_detections(date_start="2023-08-01", date_end="2023-08-01") == 1
+
+    # Read-only DB with stale view falls back cleanly to tempdir view DB
+    stale_ro.chmod(0o444)
+    try:
+        monkeypatch.setattr(settings, "CAL_DUCKDB_PATH", str(stale_ro))
+        st_ro = query.duckdb_status()
+        assert st_ro["available"] is True
+        assert st_ro["status"] == "ok"
+        assert query.count_detections(date_start="2023-08-01", date_end="2023-08-01") == 1
+    finally:
+        stale_ro.chmod(0o644)

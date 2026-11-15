@@ -39,8 +39,13 @@ def _db_ok() -> bool:
 
 
 def _connect():
-    db_file = str(settings.resolve_repo_path(
-        settings.get_setting("CAL_EVENTS_DB_PATH", settings.CAL_EVENTS_DB_PATH)))
+    ev_st = query.events_db_status()
+    db_file = (
+        ev_st["resolved_path"]
+        if ev_st["available"] and ev_st.get("resolved_path")
+        else str(settings.resolve_repo_path(
+            settings.get_setting("CAL_EVENTS_DB_PATH", settings.CAL_EVENTS_DB_PATH)))
+    )
     conn = store.connect(db_file)
     store.init_schema(conn)
     return conn

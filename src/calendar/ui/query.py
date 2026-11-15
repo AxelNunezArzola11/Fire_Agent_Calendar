@@ -7,9 +7,13 @@ directly. Callers cache loaded documents (see 3E); these loaders just read.
 
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
 import os
+import shutil
 import sqlite3
+import tempfile
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -157,34 +161,55 @@ def duckdb_status(db_path: str | None = None) -> dict:
     try:
         _probe(resolved)
     except duckdb.Error as exc:
-        # Local repo directory relocation only: if the existing DuckDB detections
-        # view points to stale Parquet paths while local normalized_parquet exists,
-        # rebuild the read-only view cleanly from Parquet. Never touch invalid files.
+        # Repo directory relocation / cloud mount handling: if the DuckDB detections
+        # view points to stale Parquet paths while normalized_parquet exists,
+        # rebuild the view cleanly from Parquet (in place if writable, else in tmp).
         parquet_raw = settings.get_setting("PARQUET_ROOT", settings.PARQUET_ROOT)
         parquet_dir = settings.resolve_repo_path(parquet_raw) if parquet_raw else Path("")
         if (
             "No files found" in str(exc)
             and parquet_dir.is_dir()
             and any(parquet_dir.rglob("*.parquet"))
-            and os.access(resolved, os.W_OK)
         ):
-            try:
-                from ..processing import duckdb_layer
+            from ..processing import duckdb_layer
 
-                duckdb_layer.init_db(str(resolved), str(parquet_dir))
-                _probe(resolved)
-                return {
-                    **base,
-                    "available": True,
-                    "status": "ok",
-                    "reason": "DuckDB geospatial database verified (view refreshed).",
-                }
-            except Exception as repair_exc:
-                return {
-                    **base,
-                    "status": "invalid",
-                    "reason": f"DuckDB validation failed for {raw_path}: {repair_exc}",
-                }
+            candidates = []
+            if os.access(resolved, os.W_OK) and os.access(resolved.parent, os.W_OK):
+                candidates.append(resolved)
+            tag = hashlib.sha256(str(parquet_dir.resolve()).encode("utf-8")).hexdigest()[:12]
+            candidates.append(Path(tempfile.gettempdir()) / f"fireagent_calendar_{tag}.duckdb")
+
+            last_err: Exception | None = None
+            for target in candidates:
+                if target != resolved and target.is_file() and target.stat().st_size > 0:
+                    try:
+                        _probe(target)
+                        return {
+                            **base,
+                            "available": True,
+                            "status": "ok",
+                            "resolved_path": str(target),
+                            "reason": "DuckDB geospatial database verified (cached view).",
+                        }
+                    except Exception:
+                        pass
+                try:
+                    duckdb_layer.init_db(str(target), str(parquet_dir))
+                    _probe(target)
+                    return {
+                        **base,
+                        "available": True,
+                        "status": "ok",
+                        "resolved_path": str(target),
+                        "reason": "DuckDB geospatial database verified (view refreshed).",
+                    }
+                except Exception as repair_exc:
+                    last_err = repair_exc
+            return {
+                **base,
+                "status": "invalid",
+                "reason": f"DuckDB validation failed for {raw_path}: {last_err}",
+            }
         return {
             **base,
             "status": "invalid",
@@ -307,6 +332,39 @@ def artifact_status(stage: str, filename: str, exec_id: str | None = None,
     }
 
 
+def _ensure_events_db_from_gz(resolved: Path) -> Path:
+    """Decompress a sibling .sqlite.gz archive once when the raw .sqlite is absent."""
+    if resolved.exists():
+        return resolved
+    gz_path = Path(f"{resolved}.gz")
+    try:
+        if not gz_path.is_file() or not os.access(gz_path, os.R_OK) or gz_path.stat().st_size == 0:
+            return resolved
+    except OSError:
+        return resolved
+
+    writable_parent = resolved.parent.exists() and os.access(resolved.parent, os.W_OK)
+    tag = hashlib.sha256(str(gz_path.resolve()).encode("utf-8")).hexdigest()[:12]
+    target = resolved if writable_parent else (Path(tempfile.gettempdir()) / f"{tag}_{resolved.name}")
+    try:
+        if target.is_file() and target.stat().st_size > 0:
+            return target
+    except OSError:
+        pass
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as dst, gzip.open(gz_path, "rb") as src:
+            shutil.copyfileobj(src, dst, length=8 * 1024 * 1024)
+        os.replace(tmp_path, target)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        return resolved
+    return target
+
+
 def events_db_status(db_path: str | None = None) -> dict:
     """Validate the Phase 5 SQLite events store without creating an empty DB."""
     raw_path = (db_path if db_path is not None
@@ -330,7 +388,7 @@ def events_db_status(db_path: str | None = None) -> dict:
             "status": "unconfigured",
             "reason": "CAL_EVENTS_DB_PATH is not configured.",
         }
-    resolved = settings.resolve_repo_path(raw_path)
+    resolved = _ensure_events_db_from_gz(settings.resolve_repo_path(raw_path))
     base["resolved_path"] = str(resolved)
     if not resolved.exists():
         return {

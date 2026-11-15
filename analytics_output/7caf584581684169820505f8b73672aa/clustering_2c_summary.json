@@ -1,0 +1,13 @@
+{
+  "detections_in": 482672,
+  "distance_computations": 11087010,
+  "same_sensor_links": 3129178,
+  "match_group_links": 135870,
+  "clusters": 137640,
+  "singletons": 74284,
+  "load_s": 8.4,
+  "cluster_s": 1830.8,
+  "size_min": 1,
+  "size_max": 3872,
+  "size_mean": 3.51
+}

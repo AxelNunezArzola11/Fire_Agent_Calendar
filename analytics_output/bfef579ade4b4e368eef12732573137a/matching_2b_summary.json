@@ -1,0 +1,17 @@
+{
+  "modis_in": 94000,
+  "viirs_in": 388672,
+  "candidate_pairs": 1532520,
+  "distance_computations": 1532520,
+  "groups_matched": 44424,
+  "groups_ambiguous": 56806,
+  "singletons": 225083,
+  "composition": {
+    "VIIRS-only": 201288,
+    "matched": 180294,
+    "ambiguous": 77295,
+    "MODIS-only": 23795
+  },
+  "load_s": 10.5,
+  "match_s": 144.3
+}

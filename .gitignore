@@ -31,12 +31,16 @@ env/
 wildfire_cache.db
 ops.sqlite
 calendar_events.sqlite*
+!calendar_events.sqlite.gz
 calendar.duckdb
+!calendar.duckdb
 
 # ── Datasets (large / regenerable via the pipeline scripts) ─────────────────
 *.parquet
 data_raw_firms/
-normalized_parquet/
+!normalized_parquet/
+!normalized_parquet/**/
+!normalized_parquet/**/*.parquet
 backup_mirror/
 l2_data/
 data/
@@ -44,13 +48,33 @@ elephant-goldfish-model/
 pilot_outputs/
 reports/
 analytics_runs.jsonl
+!analytics_runs.jsonl
 analytics_output/*
+!analytics_output/7ce0d0f7fb1f4e43a348703dc8017a0d/
+analytics_output/7ce0d0f7fb1f4e43a348703dc8017a0d/*
+!analytics_output/7ce0d0f7fb1f4e43a348703dc8017a0d/validation_2a.json
+!analytics_output/bfef579ade4b4e368eef12732573137a/
+analytics_output/bfef579ade4b4e368eef12732573137a/*
+!analytics_output/bfef579ade4b4e368eef12732573137a/match_members.parquet
+!analytics_output/bfef579ade4b4e368eef12732573137a/match_groups.parquet
+!analytics_output/bfef579ade4b4e368eef12732573137a/matching_2b_summary.json
+!analytics_output/7caf584581684169820505f8b73672aa/
+analytics_output/7caf584581684169820505f8b73672aa/*
+!analytics_output/7caf584581684169820505f8b73672aa/clusters.parquet
+!analytics_output/7caf584581684169820505f8b73672aa/cluster_members.parquet
+!analytics_output/7caf584581684169820505f8b73672aa/clustering_2c_summary.json
 !analytics_output/9741f859517c418fa15ff6b6cbe078e2/
-!analytics_output/15bee7bd8c7947319f5a98d069f952c3/
 analytics_output/9741f859517c418fa15ff6b6cbe078e2/*
 !analytics_output/9741f859517c418fa15ff6b6cbe078e2/metrics_2d.json
+!analytics_output/15bee7bd8c7947319f5a98d069f952c3/
 analytics_output/15bee7bd8c7947319f5a98d069f952c3/*
 !analytics_output/15bee7bd8c7947319f5a98d069f952c3/index_2e.json
+!analytics_output/61722b7636194828899dbeac7085b70e/
+analytics_output/61722b7636194828899dbeac7085b70e/*
+!analytics_output/61722b7636194828899dbeac7085b70e/baselines_4b.json
+!analytics_output/461ecbc98ca14f11910e8bcda7254027/
+analytics_output/461ecbc98ca14f11910e8bcda7254027/*
+!analytics_output/461ecbc98ca14f11910e8bcda7254027/anomalies_4c.json
 
 # ── Test / tooling caches ───────────────────────────────────────────────────
 .pytest_cache/

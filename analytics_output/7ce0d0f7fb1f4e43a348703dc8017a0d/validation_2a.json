@@ -1,0 +1,161 @@
+{
+  "datasets": [
+    {
+      "dataset_id": "modis-2023-USA",
+      "product": "modis",
+      "sensor": "terra_aqua",
+      "processing_version": "cal_norm_v1",
+      "source_file": "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/data_raw_firms/modis/terra_aqua/open-archive-2023-United_States/modis_2023_United_States.csv",
+      "source_sha256": "8f693b80488414db0494deac1081f4c658769618100e402a830fb823f8f6ec1f",
+      "source_size_bytes": 7572283,
+      "catalog_counts": {
+        "accepted": 94000,
+        "rejected": 0,
+        "source": 94000
+      },
+      "live_rows": 94000,
+      "counts_agree": true,
+      "coverage": {
+        "geographic": {
+          "lat_max": 68.2016,
+          "lat_min": 19.1496,
+          "lon_max": -67.3794,
+          "lon_min": -164.0724
+        },
+        "temporal": {
+          "max": "2023-12-31T20:50:00+00:00",
+          "min": "2023-01-01T18:19:00+00:00"
+        }
+      },
+      "raw_file_present": true,
+      "satellites": [
+        "Aqua",
+        "Terra"
+      ],
+      "instruments": [
+        "MODIS"
+      ],
+      "live_span": {
+        "min": "2023-01-01T18:19:00+00:00",
+        "max": "2023-12-31T20:50:00+00:00"
+      },
+      "null_frp": 0,
+      "empty_confidence": 0
+    },
+    {
+      "dataset_id": "viirs-snpp-2023-USA",
+      "product": "viirs-snpp",
+      "sensor": "snpp",
+      "processing_version": "cal_norm_v1",
+      "source_file": "/home/axelnez/Documentos/13semestre/spaceapps/fireagent-sar/data_raw_firms/viirs-snpp/snpp/open-archive-2023-United_States/viirs-snpp_2023_United_States.csv",
+      "source_sha256": "d419abfb7d39d8040fd4487aee7e8003b1940ae5eb0cd95aa244cd7e303d4b4d",
+      "source_size_bytes": 30962191,
+      "catalog_counts": {
+        "accepted": 388672,
+        "rejected": 0,
+        "source": 388672
+      },
+      "live_rows": 388672,
+      "counts_agree": true,
+      "coverage": {
+        "geographic": {
+          "lat_max": 70.49563,
+          "lat_min": 18.91701,
+          "lon_max": -66.98772,
+          "lon_min": -169.95404
+        },
+        "temporal": {
+          "max": "2023-12-31T21:01:00+00:00",
+          "min": "2023-01-01T06:39:00+00:00"
+        }
+      },
+      "raw_file_present": true,
+      "satellites": [
+        "N"
+      ],
+      "instruments": [
+        "VIIRS"
+      ],
+      "live_span": {
+        "min": "2023-01-01T06:39:00+00:00",
+        "max": "2023-12-31T21:01:00+00:00"
+      },
+      "null_frp": 0,
+      "empty_confidence": 0
+    }
+  ],
+  "checks": [
+    {
+      "check": "modis-2023-USA:counts",
+      "status": "pass",
+      "detail": "live=94000 catalog=94000"
+    },
+    {
+      "check": "modis-2023-USA:detection-ids",
+      "status": "pass",
+      "detail": "duplicate_ids=0"
+    },
+    {
+      "check": "modis-2023-USA:coords",
+      "status": "pass",
+      "detail": "invalid_coords=0"
+    },
+    {
+      "check": "modis-2023-USA:timestamps",
+      "status": "pass",
+      "detail": "unparseable_ts=0"
+    },
+    {
+      "check": "modis-2023-USA:frp",
+      "status": "pass",
+      "detail": "null_frp=0"
+    },
+    {
+      "check": "modis-2023-USA:confidence",
+      "status": "pass",
+      "detail": "empty_confidence=0"
+    },
+    {
+      "check": "modis-2023-USA:lineage",
+      "status": "pass",
+      "detail": "raw_present=True sha=set"
+    },
+    {
+      "check": "viirs-snpp-2023-USA:counts",
+      "status": "pass",
+      "detail": "live=388672 catalog=388672"
+    },
+    {
+      "check": "viirs-snpp-2023-USA:detection-ids",
+      "status": "pass",
+      "detail": "duplicate_ids=0"
+    },
+    {
+      "check": "viirs-snpp-2023-USA:coords",
+      "status": "pass",
+      "detail": "invalid_coords=0"
+    },
+    {
+      "check": "viirs-snpp-2023-USA:timestamps",
+      "status": "pass",
+      "detail": "unparseable_ts=0"
+    },
+    {
+      "check": "viirs-snpp-2023-USA:frp",
+      "status": "pass",
+      "detail": "null_frp=0"
+    },
+    {
+      "check": "viirs-snpp-2023-USA:confidence",
+      "status": "pass",
+      "detail": "empty_confidence=0"
+    },
+    {
+      "check": "viirs-snpp-2023-USA:lineage",
+      "status": "pass",
+      "detail": "raw_present=True sha=set"
+    }
+  ],
+  "invalid_examples": [],
+  "overall": "pass"
+}
