@@ -42,6 +42,26 @@ def _anomalies(fingerprint: tuple) -> list:
     return query.load_anomalies()
 
 
+def _metrics_if_available(fingerprint: tuple) -> dict | None:
+    """Load Phase 2D metrics when available, or return None without crashing."""
+    if not query.artifact_status("2D", query.METRICS_FILENAME)["available"]:
+        return None
+    try:
+        return _metrics(fingerprint)
+    except FileNotFoundError:
+        return None
+
+
+def _anomalies_if_available(fingerprint: tuple) -> list | None:
+    """Load Phase 4C anomalies when available, or return None without crashing."""
+    if not query.artifact_status("4C", "anomalies_4c.json")["available"]:
+        return None
+    try:
+        return _anomalies(fingerprint)
+    except FileNotFoundError:
+        return None
+
+
 @st.cache_data(show_spinner="Loading detections…")
 def _detections(fingerprint: tuple, date_start: str, date_end: str,
                 products: tuple, satellites: tuple, bbox, modis_conf_min,
@@ -190,8 +210,14 @@ def _map_callbacks(fingerprint: tuple) -> map_view.MapCallbacks:
 @st.cache_data(show_spinner=False)
 def _spans() -> dict:
     """Per-dataset verified coverage spans from the Phase 1 catalog."""
-    catalog = json.loads(Path(settings.CATALOG_PATH).read_text(encoding="utf-8"))
-    return query.catalog_spans(catalog)
+    cat_st = query.catalog_status()
+    if not cat_st["available"]:
+        return {}
+    try:
+        catalog = json.loads(Path(cat_st["resolved_path"]).read_text(encoding="utf-8"))
+        return query.catalog_spans(catalog)
+    except (OSError, ValueError):
+        return {}
 
 
 def _aoi_controls() -> None:
@@ -343,20 +369,40 @@ def _sidebar() -> None:
             _aoi_controls()
         spans = _spans()
         with st.expander("Verified coverage"):
-            for dataset, span in sorted(spans.items()):
-                st.write(f"{dataset}: {span['min']} to {span['max']}")
+            if spans:
+                for dataset, span in sorted(spans.items()):
+                    st.write(f"{dataset}: {span['min']} to {span['max']}")
+            else:
+                st.caption("Catalog coverage metadata unavailable.")
         with st.expander("Analytical provenance"):
             for stage, exec_id in sorted(query.exec_chain().items()):
-                st.write(f"Phase 2{stage}: `{exec_id[:8]}`")
+                st.write(f"Phase {stage}: `{exec_id[:8]}`"
+                         if exec_id else f"Phase {stage}: unconfigured")
             for stage, exec_id in sorted(query.phase4_chain().items()):
-                st.write(f"Phase {stage}: `{exec_id[:8]}`")
+                st.write(f"Phase {stage}: `{exec_id[:8]}`"
+                         if exec_id else f"Phase {stage}: unconfigured")
             for stage, exec_id in sorted(query.phase5_chain().items()):
                 st.write(f"Phase {stage}: `{exec_id[:8]}`"
                          if exec_id else f"Phase {stage}: not built yet")
+        with st.expander("Deployment data status"):
+            ov = query.storage_overview()
+            rows = [
+                ("Calendar (2D)", ov["artifacts"]["2D_metrics"]["available"]),
+                ("Map Detections (DuckDB)", ov["duckdb"]["available"]),
+                ("Map Clusters (2C)", ov["artifacts"]["2C_clusters"]["available"]),
+                ("Analytics (4C)", ov["artifacts"]["4C_anomalies"]["available"]),
+                ("Events DB", ov["events_db"]["available"]),
+                ("Export Ready", ov["duckdb"]["available"]
+                 and ov["artifacts"]["2B_members"]["available"]
+                 and ov["artifacts"]["2C_members"]["available"]),
+            ]
+            for label, ok in rows:
+                st.caption(f"{label}: {'ready' if ok else 'unavailable'}")
         st.info(calendar_view.METHODOLOGY_NOTE)
 
 
-def _about_tab(metrics: dict) -> None:
+def _about_tab(metrics: dict | None) -> None:
+    metrics = metrics or {}
     st.header("About this data")
     st.write("FireAgent Calendar explores the verified 2023 NASA FIRMS pilot "
              "(482,672 accepted MODIS and VIIRS Standard detections) through "
@@ -370,7 +416,7 @@ def _about_tab(metrics: dict) -> None:
              "(NRT→Standard lag applies upstream); per-file availability "
              "dates are not tracked in the pilot.")
     st.write(f"- Processing date: {computed.get('computed_at', 'unavailable')} "
-             f"(metrics exec `{computed.get('exec_id', '')[:8]}`).")
+             f"(metrics exec `{(computed.get('exec_id') or 'unconfigured')[:8]}`).")
     st.write("All displayed timestamps are UTC unless labeled otherwise.")
     st.subheader("Methodology")
     st.write("- Satellite observations are not unique fires: one fire can be "
@@ -408,26 +454,34 @@ def _about_tab(metrics: dict) -> None:
     st.subheader("Data sources")
     chain = query.exec_chain()
     chain4 = query.phase4_chain()
+    chain5 = query.phase5_chain()
+    ov = query.storage_overview()
+    arts = ov["artifacts"]
+
+    def _exec_tag(eid: str, ok: bool) -> str:
+        prefix = (eid or "unconfigured")[:8]
+        return f"{prefix} ({'ready' if ok else 'unavailable'})"
+
     st.table(frames.about_sources_frame([
         {"Feature": "Calendar metrics", "Source": "metrics_2d.json",
-         "Execution": chain["2D"][:8]},
+         "Execution": _exec_tag(chain["2D"], arts["2D_metrics"]["available"])},
         {"Feature": "Dual index views", "Source": "index_2e.json",
-         "Execution": chain["2E"][:8]},
+         "Execution": _exec_tag(chain["2E"], arts["2E_index"]["available"])},
         {"Feature": "Map detections", "Source": "DuckDB detections view",
-         "Execution": "Phase 1D cal_norm_v1"},
+         "Execution": (f"Phase 1D cal_norm_v1 "
+                       f"({'ready' if ov['duckdb']['available'] else ov['duckdb']['status']})")},
         {"Feature": "Map clusters", "Source": "clusters.parquet",
-         "Execution": chain["2C"][:8]},
+         "Execution": _exec_tag(chain["2C"], arts["2C_clusters"]["available"])},
         {"Feature": "Match classes", "Source": "match_members.parquet",
-         "Execution": chain["2B"][:8]},
+         "Execution": _exec_tag(chain["2B"], arts["2B_members"]["available"])},
         {"Feature": "Coverage", "Source": "catalog.json",
-         "Execution": "Phase 1D"},
+         "Execution": f"Phase 1D ({'ready' if ov['catalog']['available'] else ov['catalog']['status']})"},
         {"Feature": "Baselines", "Source": "baselines_4b.json",
-         "Execution": chain4["4B"][:8]},
+         "Execution": _exec_tag(chain4["4B"], arts["4B_baselines"]["available"])},
         {"Feature": "Anomalies", "Source": "anomalies_4c.json",
-         "Execution": chain4["4C"][:8]},
+         "Execution": _exec_tag(chain4["4C"], arts["4C_anomalies"]["available"])},
         {"Feature": "Events & alerts", "Source": "calendar_events.sqlite",
-         "Execution": (query.phase5_chain()["5C"][:8]
-                       if query.phase5_chain()["5C"] else "not built yet")},
+         "Execution": _exec_tag(chain5["5C"] or "not built", ov["events_db"]["available"])},
     ]))
     st.subheader("How to cite")
     for citation in calendar_view.CITATIONS:
@@ -447,9 +501,16 @@ def main() -> None:
     tab_calendar, tab_map, tab_analytics, tab_events, tab_export, tab_about = st.tabs(
         ["Fire Calendar", "Activity Map", "Historical Analytics",
          "Events & Alerts", "Data Export", "About"])
+    metrics_doc = _metrics_if_available(fingerprint)
+    anomalies_doc = _anomalies_if_available(fingerprint)
     with tab_calendar:
         try:
-            calendar_view.render_calendar_tab(_metrics(fingerprint), _spans())
+            if metrics_doc is None:
+                met_st = query.artifact_status("2D", query.METRICS_FILENAME)
+                st.warning(f"Calendar metrics output unavailable ({met_st['status']}).")
+                st.info(f"{met_st['reason']} — {met_st['remediation']}")
+            else:
+                calendar_view.render_calendar_tab(metrics_doc, _spans())
         except Exception as exc:  # per-tab guard (dashboard idiom)
             st.error(f"Calendar error: {exc}")
     with tab_map:
@@ -459,13 +520,12 @@ def main() -> None:
             st.error(f"Map error: {exc}")
     with tab_analytics:
         try:
-            analytics_view.render_analytics_tab(_anomalies(fingerprint))
+            analytics_view.render_analytics_tab(anomalies_doc)
         except Exception as exc:
             st.error(f"Analytics error: {exc}")
     with tab_events:
         try:
-            events_view.render_events_tab(_metrics(fingerprint),
-                                          _anomalies(fingerprint))
+            events_view.render_events_tab(metrics_doc, anomalies_doc)
         except Exception as exc:  # per-tab guard (dashboard idiom)
             st.error(f"Events error: {exc}")
     with tab_export:
@@ -475,7 +535,7 @@ def main() -> None:
             st.error(f"Export error: {exc}")
     with tab_about:
         try:
-            _about_tab(_metrics(fingerprint))
+            _about_tab(metrics_doc)
         except Exception as exc:
             st.error(f"About error: {exc}")
 

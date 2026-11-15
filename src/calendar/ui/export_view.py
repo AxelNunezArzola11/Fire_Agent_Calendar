@@ -170,12 +170,12 @@ def readme_text(*, category: str, filters_used: dict, total: int,
     lines += [
         "",
         "Provenance:",
-        f"  Phase 2A validation: exec {chain['2A'][:8]}",
-        f"  Phase 2B matching (matcher_v1): exec {chain['2B'][:8]}",
-        f"  Phase 2C clustering (cluster_v1): exec {chain['2C'][:8]}",
+        f"  Phase 2A validation: exec {(chain['2A'] or 'unconfigured')[:8]}",
+        f"  Phase 2B matching (matcher_v1): exec {(chain['2B'] or 'unconfigured')[:8]}",
+        f"  Phase 2C clustering (cluster_v1): exec {(chain['2C'] or 'unconfigured')[:8]}",
         f"  Normalized inputs: Phase 1D cal_norm_v1 (see catalog.json).",
-        f"  Baselines/anomalies (context only): 4B {chain4['4B'][:8]} / "
-        f"4C {chain4['4C'][:8]}.",
+        f"  Baselines/anomalies (context only): 4B {(chain4['4B'] or 'unconfigured')[:8]} / "
+        f"4C {(chain4['4C'] or 'unconfigured')[:8]}.",
         "",
         f"Coordinates: {CRS_NOTE}.",
         f"Temporal basis: {TEMPORAL_NOTE}.",
@@ -244,6 +244,31 @@ def _scoped_satellites(category: str, selection: dict) -> tuple:
     return satellites
 
 
+def export_source_status(category: str) -> dict:
+    """Verify all required scientific data sources before counting or exporting."""
+    if category not in CATEGORIES:
+        raise ValueError(f"unknown export category {category!r}")
+    if category == "clusters":
+        sources = [query.artifact_status("2C", "clusters.parquet")]
+    else:
+        sources = [
+            query.duckdb_status(),
+            query.artifact_status("2B", "match_members.parquet"),
+            query.artifact_status("2C", "cluster_members.parquet"),
+        ]
+        if category == "harmonized":
+            sources.append(query.artifact_status("2B", "match_groups.parquet"))
+    missing = [s for s in sources if not s["available"]]
+    return {
+        "available": len(missing) == 0,
+        "category": category,
+        "sources": sources,
+        "missing": missing,
+        "reason": "; ".join(m["reason"] for m in missing)
+        if missing else "All required export sources verified.",
+    }
+
+
 def _count_for(category: str, selection: dict, bbox) -> int:
     if category == "clusters":
         return query.count_clusters(date_start=selection["date_start"],
@@ -271,10 +296,19 @@ def build_export(category: str, selection: dict, bbox) -> dict:
     """Generate one export payload (bounded rows + bytes).
 
     Returns {csv_text, readme, total, exported, truncated, filename}.
-    Raises ValueError on unknown category or invalid selection.
+    Raises ValueError on unknown category or invalid selection, and
+    DataUnavailableError when any required data source is unavailable.
     """
     if category not in CATEGORIES:
         raise ValueError(f"unknown export category {category!r}")
+    query._day_bounds(selection["date_start"], selection["date_end"])
+    src_st = export_source_status(category)
+    if not src_st["available"]:
+        raise query.DataUnavailableError(
+            f"Export refused for category {category!r}: required data source "
+            f"unavailable ({src_st['reason']})",
+            status=src_st,
+        )
     total = _count_for(category, selection, bbox)
     if total == 0:
         columns = (list(query.CLUSTER_MAP_COLUMNS)
@@ -390,8 +424,32 @@ def render_export_tab() -> None:
                f"{', '.join(selection['products']) or 'no products'} · "
                f"{', '.join(selection['satellites']) or 'no satellites'}"
                + (f" · bbox {bbox}" if bbox else " · full pilot"))
+    src_st = export_source_status(category)
+    if not src_st["available"]:
+        st.session_state[KEY_EX_PAYLOAD] = None
+        missing_lines = "\n".join(
+            f"- `{m.get('path') or m.get('filename') or m.get('env_var')}` "
+            f"(`{m.get('env_var')}` · status `{m.get('status')}`): {m.get('reason')}"
+            for m in src_st["missing"]
+        )
+        st.warning(
+            f"Export unavailable for '{CATEGORIES[category]}': required scientific "
+            "data source is not present in this deployment."
+        )
+        st.info(
+            "Missing export source(s):\n"
+            f"{missing_lines}\n\n"
+            "Configure the required path/execution settings via Streamlit Secrets or "
+            "environment variables. Export refuses to generate empty or fabricated CSV "
+            "files when source data is unavailable."
+        )
+        return
     try:
         total = _count_for(category, selection, bbox)
+    except FileNotFoundError as exc:
+        st.session_state[KEY_EX_PAYLOAD] = None
+        st.warning(f"Export unavailable for '{CATEGORIES[category]}': {exc}")
+        return
     except ValueError as exc:
         st.error(f"Invalid filter: {exc}")
         return
@@ -409,6 +467,10 @@ def render_export_tab() -> None:
         with st.spinner("Building export…"):
             try:
                 payload = build_export(category, selection, bbox)
+            except FileNotFoundError as exc:
+                st.session_state[KEY_EX_PAYLOAD] = None
+                st.warning(f"Export refused — data source unavailable: {exc}")
+                return
             except ValueError as exc:
                 st.error(f"Export failed: {exc}")
                 return

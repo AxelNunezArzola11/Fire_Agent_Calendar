@@ -108,12 +108,34 @@ def _fmt_stat(value) -> str:
     return str(value)
 
 
-def render_analytics_tab(records: list[dict]) -> None:
+def render_analytics_tab(records: list[dict] | None = None) -> None:
     """Full Historical Analytics tab (selectors + trend + notables + detail)."""
     import pandas as pd
     import streamlit as st
 
     _init_state()
+    if records is None:
+        anom_st = query.artifact_status("4C", "anomalies_4c.json")
+        if not anom_st["available"]:
+            st.warning(f"Historical anomaly output unavailable ({anom_st['status']}).")
+            st.info(
+                f"Required Phase 4C analytical artifact is missing in this deployment.\n\n"
+                f"- Missing artifact: `{anom_st['path'] or 'anomalies_4c.json'}`\n"
+                f"- Execution ID (`{anom_st['env_var']}`): "
+                f"`{anom_st['exec_id'] or '(unconfigured)'}`\n"
+                f"- Detail: {anom_st['reason']}\n"
+                f"- How to configure: {anom_st['remediation']}\n\n"
+                "No anomaly scores or baselines are fabricated when Stage 4C outputs are absent."
+            )
+            st.info(METHODOLOGY_NOTE)
+            return
+        try:
+            records = query.load_anomalies()
+        except FileNotFoundError as exc:
+            st.warning("Historical anomaly output unavailable.")
+            st.info(f"{exc}. No anomalies are fabricated when Stage 4C outputs are absent.")
+            st.info(METHODOLOGY_NOTE)
+            return
     if st.session_state.get(filters.KEY_AOI_MODE, "full") != "full":
         st.info("Area of interest active (map only): historical analytics "
                 "are pilot-wide (USA). Regional breakdowns are not part of "

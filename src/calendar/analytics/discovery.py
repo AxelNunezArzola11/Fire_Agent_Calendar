@@ -10,12 +10,23 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from .. import settings
 from ..processing import catalog as catalog_mod
 from ..processing import duckdb_layer
 
 logger = logging.getLogger(__name__)
 
 EXAMPLE_LIMIT = 20
+
+
+def _resolve_local_path(raw_path: str, marker: str, root: str | Path) -> Path:
+    """Resolve a recorded path, falling back to `root` if the repo was relocated."""
+    p = Path(raw_path)
+    if p.exists():
+        return p
+    if marker in raw_path:
+        return settings.resolve_repo_path(Path(root) / raw_path.split(marker, 1)[1])
+    return p
 
 
 def discover_inputs(catalog_path: str, db_path: str) -> list[dict]:
@@ -33,6 +44,11 @@ def discover_inputs(catalog_path: str, db_path: str) -> list[dict]:
             if entry["dataset_id"].startswith(product):
                 key = (product, sensor)
                 break
+        raw_path = raw.get("path", "")
+        resolved_raw = (
+            _resolve_local_path(raw_path, "data_raw_firms/", settings.RAW_ROOT)
+            if raw_path else None
+        )
         datasets.append({
             "dataset_id": entry["dataset_id"],
             "product": key[0] if key else None,
@@ -45,7 +61,7 @@ def discover_inputs(catalog_path: str, db_path: str) -> list[dict]:
             "live_rows": live.get(key) if key else None,
             "counts_agree": (live.get(key) == counts.get("accepted")) if key else False,
             "coverage": latest.get("coverage", {}),
-            "raw_file_present": Path(raw.get("path", "")).is_file() if raw.get("path") else False,
+            "raw_file_present": resolved_raw.is_file() if resolved_raw else False,
         })
     return datasets
 

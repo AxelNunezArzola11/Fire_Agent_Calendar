@@ -613,7 +613,11 @@ def playback_slice(df: pd.DataFrame, day: str,
 def _render_detection_detail(detection_id: str, cb: MapCallbacks) -> None:
     import streamlit as st
 
-    det = cb.by_det(detection_id)
+    try:
+        det = cb.by_det(detection_id)
+    except FileNotFoundError as exc:
+        st.warning(f"Detection detail unavailable: {exc}")
+        return
     if det is None:
         st.warning(f"No detection with id {detection_id!r} in the pilot data.")
         return
@@ -635,7 +639,10 @@ def _render_detection_detail(detection_id: str, cb: MapCallbacks) -> None:
         st.write("Source file:", fmt(det.get("source_file")))
         st.write("Source SHA-256:", (fmt(det.get("source_sha256"))[:16] + "…")
                  if det.get("source_sha256") else "unavailable")
-    member = cb.member(detection_id)
+    try:
+        member = cb.member(detection_id)
+    except FileNotFoundError:
+        member = None
     if member is None:
         st.caption("Match record: unavailable.")
         return
@@ -646,7 +653,10 @@ def _render_detection_detail(detection_id: str, cb: MapCallbacks) -> None:
                f"(exec {fmt(member.get('exec_id'))[:8]}).")
     match_id = member.get("match_id")
     if match_id:
-        group = cb.group(match_id)
+        try:
+            group = cb.group(match_id)
+        except FileNotFoundError:
+            group = None
         if group is not None:
             with st.expander(f"Fellow members of {match_id} (bounded preview)"):
                 try:
@@ -662,7 +672,11 @@ def _render_detection_detail(detection_id: str, cb: MapCallbacks) -> None:
 def _render_cluster_detail(cluster_id: str, cb: MapCallbacks) -> None:
     import streamlit as st
 
-    clu = cb.by_clu(cluster_id)
+    try:
+        clu = cb.by_clu(cluster_id)
+    except FileNotFoundError as exc:
+        st.warning(f"Cluster detail unavailable: {exc}")
+        return
     if clu is None:
         st.warning(f"No cluster with id {cluster_id!r} in the pilot data.")
         return
@@ -810,6 +824,35 @@ def render_map_tab(spans: dict, cb: MapCallbacks) -> None:
         show_extent = st.checkbox("Observation extents (bbox, not perimeters)",
                                   value=True, key=KEY_SHOW_EXTENT)
 
+    if mode == "detections":
+        db_st = query.duckdb_status()
+        if not db_st["available"]:
+            st.session_state[KEY_SELECTED_ID] = None
+            st.warning("Map geospatial detection dataset is unavailable in this deployment.")
+            st.info(
+                f"Required geospatial dataset not configured or present.\n\n"
+                f"- Configured path (`{db_st['env_var']}`): `{db_st['path'] or '(unconfigured)'}` "
+                f"(status: `{db_st['status']}`)\n"
+                f"- Detail: {db_st['reason']}\n"
+                f"- How to enable: {db_st['remediation']}\n\n"
+                "No synthetic fire detections or fictional map points are generated."
+            )
+            return
+    else:
+        clu_st = query.artifact_status("2C", "clusters.parquet")
+        if not clu_st["available"]:
+            st.session_state[KEY_SELECTED_ID] = None
+            st.warning("Map hotspot cluster artifact is unavailable in this deployment.")
+            st.info(
+                f"Required cluster dataset is not present.\n\n"
+                f"- Missing artifact: `{clu_st['path'] or 'clusters.parquet'}` "
+                f"(status: `{clu_st['status']}`, exec `{clu_st['exec_id'][:8] if clu_st['exec_id'] else 'unconfigured'}`)\n"
+                f"- Configuration variables: `{clu_st['root_env_var']}`, `{clu_st['env_var']}`\n"
+                f"- Detail: {clu_st['reason']}\n\n"
+                "No synthetic hotspot clusters are generated."
+            )
+            return
+
     try:
         if mode == "detections":
             total = cb.count_det(date_start=date_start, date_end=date_end,
@@ -817,6 +860,12 @@ def render_map_tab(spans: dict, cb: MapCallbacks) -> None:
                                  modis_conf_min=modis_conf, viirs_conf=viirs_conf)
         else:
             total = cb.count_clu(date_start=date_start, date_end=date_end, bbox=bbox)
+    except FileNotFoundError as exc:
+        st.session_state[KEY_SELECTED_ID] = None
+        st.warning("Map data source is unavailable in this deployment.")
+        st.info(f"Required dataset could not be opened: {exc}. "
+                "No synthetic fire detections or clusters are generated.")
+        return
     except ValueError as exc:
         st.error(f"Invalid filter: {exc}")
         return
@@ -857,6 +906,10 @@ def render_map_tab(spans: dict, cb: MapCallbacks) -> None:
                                      show_boundary=show_boundary, fit=bbox)
             map_key = map_data_key(mode=mode, df=df, id_col="cluster_id",
                                    display=(show_extent, show_boundary, bbox))
+    except FileNotFoundError as exc:
+        st.warning("Map data source became unavailable while loading geometry.")
+        st.info(f"{exc}. No synthetic map points are generated.")
+        return
     except Exception as exc:
         st.error(f"Map construction failed: {exc}")
         return

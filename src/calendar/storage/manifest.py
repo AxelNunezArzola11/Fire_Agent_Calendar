@@ -155,6 +155,19 @@ def verify_tree(raw_root: str) -> dict:
     report: dict = {"ok": [], "mismatch": [], "missing": [], "total": len(files)}
     for path, event in files.items():
         target = Path(path)
+        if not target.is_file() and all(
+            k in event for k in ("product", "sensor", "batch_id", "filename")
+        ):
+            # Support local repository directory relocation without weakening SHA-256 verification.
+            candidate = layout.raw_file_path(
+                raw_root,
+                event["product"],
+                event["sensor"],
+                event["batch_id"],
+                event["filename"],
+            )
+            if candidate.is_file():
+                target = candidate
         if not target.is_file():
             report["missing"].append(path)
         elif integrity.sha256_file(target) != event.get("sha256"):

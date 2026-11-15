@@ -35,11 +35,13 @@ METHODOLOGY_NOTE = ("Events group satellite observations over time; they are "
 
 
 def _db_ok() -> bool:
-    return Path(settings.CAL_EVENTS_DB_PATH).is_file()
+    return query.events_db_status()["available"]
 
 
 def _connect():
-    conn = store.connect(settings.CAL_EVENTS_DB_PATH)
+    db_file = str(settings.resolve_repo_path(
+        settings.get_setting("CAL_EVENTS_DB_PATH", settings.CAL_EVENTS_DB_PATH)))
+    conn = store.connect(db_file)
     store.init_schema(conn)
     return conn
 
@@ -67,6 +69,9 @@ def _render_events(conn) -> None:
     st.caption(f"{total:,} activity events (one per hotspot cluster).")
     st.caption("This list is global (all dates); Map, Analytics, "
                "Pipeline, and Exports follow the shared sidebar range.")
+    if total == 0:
+        st.info("No events detected in the configured events database "
+                "(0 event records registered — verified empty event store, not unavailable data).")
     col_a, col_b = st.columns(2)
     with col_a:
         st.selectbox("Lifecycle state", options=["All", *model.LIFECYCLE_STATES],
@@ -81,6 +86,8 @@ def _render_events(conn) -> None:
         conn, state=None if state == "All" else state,
         severity=None if severity == "All" else severity,
         limit=PAGE_SIZE, offset=page * PAGE_SIZE)
+    if total > 0 and not events:
+        st.info("No events detected matching the active filters.")
     st.dataframe(frames.events_frame(events), width="stretch")
     nav_a, nav_b = st.columns(2)
     with nav_a:
@@ -372,7 +379,7 @@ def _events_in_range(conn, start: str, end: str,
         clusters = query.query_clusters(
             date_start=start, date_end=end,
             limit=limit + 1).to_dict("records")
-    except (ValueError, KeyError):
+    except (ValueError, KeyError, FileNotFoundError):
         return [], False
     options = []
     for cluster in clusters[:limit]:
@@ -596,12 +603,21 @@ def _render_custom(conn, metrics, anomalies) -> None:
     from ..events import custom as custom_mod
 
     _custom_caption()
-    if metrics is None:
+    if metrics is None and query.artifact_status("2D", query.METRICS_FILENAME)["available"]:
         with st.spinner("Loading metrics…"):
-            metrics = query.load_metrics()
-    if anomalies is None:
+            try:
+                metrics = query.load_metrics()
+            except FileNotFoundError:
+                metrics = None
+    if anomalies is None and query.artifact_status("4C", "anomalies_4c.json")["available"]:
         with st.spinner("Loading anomalies…"):
-            anomalies = query.load_anomalies()
+            try:
+                anomalies = query.load_anomalies()
+            except FileNotFoundError:
+                anomalies = None
+    if metrics is None or anomalies is None:
+        st.warning("Custom rule evaluation requires Phase 2D (metrics_2d.json) and "
+                   "Phase 4C (anomalies_4c.json) outputs, which are unavailable in this deployment.")
     rules = store.list_custom_rules(conn)
     if rules:
         st.dataframe(frames.custom_rules_frame(
@@ -716,16 +732,20 @@ def _render_custom(conn, metrics, anomalies) -> None:
             btn_a, btn_b, btn_c, btn_d = st.columns(4)
             with btn_a:
                 if st.button("Run now", key=f"cal_cr_run_{rule['rule_id']}"):
-                    try:
-                        outcome = custom_mod.run_evaluation(
-                            conn, rule["rule_id"], metrics=metrics,
-                            anomalies=anomalies)
-                    except ValueError as exc:
-                        st.error(str(exc))
+                    if metrics is None or anomalies is None:
+                        st.warning("Cannot evaluate rule: required analytical outputs "
+                                   "(CAL_EXEC_2D / CAL_EXEC_4C) are unavailable.")
                     else:
-                        st.success(f"Triggered: {outcome['reason']}"
-                                   if outcome["triggered"] else
-                                   f"Not triggered: {outcome['reason']}")
+                        try:
+                            outcome = custom_mod.run_evaluation(
+                                conn, rule["rule_id"], metrics=metrics,
+                                anomalies=anomalies)
+                        except ValueError as exc:
+                            st.error(str(exc))
+                        else:
+                            st.success(f"Triggered: {outcome['reason']}"
+                                       if outcome["triggered"] else
+                                       f"Not triggered: {outcome['reason']}")
             with btn_b:
                 label = "Disable" if rule["enabled"] else "Enable"
                 if st.button(label, key=f"cal_cr_toggle_{rule['rule_id']}"):
@@ -942,11 +962,29 @@ def render_events_tab(metrics=None, anomalies=None) -> None:
     import streamlit as st
 
     _init_state()
-    if not _db_ok():
-        st.info("The events database has not been built yet "
-                f"({settings.CAL_EVENTS_DB_PATH} not found). Events, alerts, "
-                "and notifications become available after the Phase 5 batch "
-                "pipeline runs. Calendar, map, and analytics are unaffected.")
+    ev_st = query.events_db_status()
+    if not ev_st["available"]:
+        clu_st = query.artifact_status("2C", "clusters.parquet")
+        met_st = query.artifact_status("2D", query.METRICS_FILENAME)
+        anom_st = query.artifact_status("4C", "anomalies_4c.json")
+        st.warning(
+            f"Event data unavailable in this deployment ({ev_st['status']}: {ev_st['reason']}). "
+            "This represents unavailable event data, not zero detected events."
+        )
+        st.info(
+            "The events database has not been built yet or is not configured in this deployment.\n\n"
+            f"- Event store (`{ev_st['env_var']}`): `{ev_st['path'] or '(unconfigured)'}` "
+            f"(`{ev_st['status']}`)\n"
+            f"- Stage 2C clusters (`{clu_st['env_var']}`): `{clu_st['status']}` "
+            f"(`{clu_st['path'] or 'clusters.parquet'}`)\n"
+            f"- Stage 2D metrics (`{met_st['env_var']}`): `{met_st['status']}` "
+            f"(`{met_st['path'] or query.METRICS_FILENAME}`)\n"
+            f"- Stage 4C anomalies (`{anom_st['env_var']}`): `{anom_st['status']}` "
+            f"(`{anom_st['path'] or 'anomalies_4c.json'}`)\n\n"
+            f"How to enable: {ev_st['remediation']} "
+            "Calendar metrics remain unaffected when Phase 2D outputs are present."
+        )
+        st.info(METHODOLOGY_NOTE)
         return
     conn = _connect()
     try:
