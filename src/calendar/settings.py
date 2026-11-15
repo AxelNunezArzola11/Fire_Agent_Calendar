@@ -149,6 +149,10 @@ CAL_QWEN_TIMEOUT_S: float = float(_env("CAL_QWEN_TIMEOUT_S", "20"))
 # Canonical analytical outputs pinned by execution id. Override via env only
 # to point the UI at a verified re-run (e.g. 2B 176428fa, 2D c55a66ca).
 CAL_DUCKDB_PATH: str = _env("CAL_DUCKDB_PATH", "calendar.duckdb")
+CAL_REGIONAL_ROOT: str = _env("CAL_REGIONAL_ROOT", "regional_archives")
+CAL_REGIONAL_DUCKDB_PATH: str = _env(
+    "CAL_REGIONAL_DUCKDB_PATH", "regional_archives/regional.duckdb"
+)
 CAL_ANALYTICS_ROOT: str = _env("CAL_ANALYTICS_ROOT", "analytics_output")
 CAL_RUNS_PATH: str = _env("CAL_RUNS_PATH", "analytics_runs.jsonl")
 CAL_EXEC_2A: str = _env("CAL_EXEC_2A", "7ce0d0f7fb1f4e43a348703dc8017a0d")
@@ -200,6 +204,8 @@ _STORAGE_KEYS: tuple[str, ...] = (
     "BACKUP_ROOT",
     "CAL_EVENTS_DB_PATH",
     "CAL_DUCKDB_PATH",
+    "CAL_REGIONAL_ROOT",
+    "CAL_REGIONAL_DUCKDB_PATH",
     "CAL_ANALYTICS_ROOT",
     "CAL_RUNS_PATH",
     "CAL_AOI_PATH",

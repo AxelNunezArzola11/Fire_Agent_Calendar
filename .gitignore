@@ -34,6 +34,7 @@ calendar_events.sqlite*
 !calendar_events.sqlite.gz
 calendar.duckdb
 !calendar.duckdb
+regional_archives/
 
 # ── Datasets (large / regenerable via the pipeline scripts) ─────────────────
 *.parquet

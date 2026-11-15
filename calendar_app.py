@@ -256,6 +256,14 @@ def _apply_point_to_custom() -> None:
     st.session_state["cal_geo_apply_ok"] = box
 
 
+def _apply_point_preset(lat: float, lon: float, radius_km: float) -> None:
+    """on_click: set sidebar point + radius fields cleanly."""
+    st.session_state[filters.KEY_AOI_LAT] = float(lat)
+    st.session_state[filters.KEY_AOI_LON] = float(lon)
+    st.session_state[filters.KEY_AOI_RADIUS] = float(radius_km)
+    st.session_state[filters.KEY_AOI_POINT_SET] = True
+
+
 def _aoi_controls(saved_aois: dict[str, dict] | None = None) -> None:
     """Controls for the active AOI mode (inside the sidebar expander)."""
     mode = st.session_state.get(filters.KEY_AOI_MODE, "full")
@@ -279,8 +287,23 @@ def _aoi_controls(saved_aois: dict[str, dict] | None = None) -> None:
         st.session_state.setdefault(filters.KEY_AOI_LAT, 40.59)
         st.session_state.setdefault(filters.KEY_AOI_LON, -122.39)
         st.session_state.setdefault(filters.KEY_AOI_RADIUS, 50.0)
+        st.caption("Quick point presets:")
+        pt_cols = st.columns(4)
+        for col, lbl, plat, plon, prad, slug in (
+            (pt_cols[0], "Madrid", 40.42, -3.70, 100.0, "madrid"),
+            (pt_cols[1], "CDMX", 19.43, -99.13, 100.0, "cdmx"),
+            (pt_cols[2], "Brasilia", -15.79, -47.88, 150.0, "brasilia"),
+            (pt_cols[3], "Sydney", -33.87, 151.21, 120.0, "sydney"),
+        ):
+            col.button(
+                lbl,
+                key=f"cal_pt_preset_{slug}",
+                on_click=_apply_point_preset,
+                args=(plat, plon, prad),
+                help=f"Point ({plat:.2f}, {plon:.2f}) + {prad:.0f} km",
+            )
         place = st.text_input("Find place (optional)", key="cal_geo_place",
-                              placeholder="e.g. Seville, Spain or Manaus, Brazil")
+                              placeholder="e.g. Madrid, Spain or Guadalajara, Mexico")
         if st.button("Find place", key="cal_geo_find") and place:
             try:
                 found = aoi.geocode_nominatim(place.strip())
@@ -313,11 +336,24 @@ def _aoi_controls(saved_aois: dict[str, dict] | None = None) -> None:
     elif mode == "custom":
         st.session_state[filters.KEY_AOI_CUSTOM_SET] = True
         st.caption("Quick regional bbox presets:")
-        preset_cols = st.columns(4)
+        preset_r1 = st.columns(3)
         for col, rid, short in zip(
-            preset_cols,
-            ("california", "brazil", "spain", "australia"),
-            ("CA", "BR", "ES", "AU"),
+            preset_r1,
+            ("california", "mexico", "madrid"),
+            ("CA", "MX", "MAD"),
+        ):
+            col.button(
+                short,
+                key=f"cal_aoi_preset_{rid}",
+                on_click=_apply_region_bbox,
+                args=(rid,),
+                help=f"Set custom bbox to {regions.region_label(rid)}",
+            )
+        preset_r2 = st.columns(3)
+        for col, rid, short in zip(
+            preset_r2,
+            ("brazil", "spain", "australia"),
+            ("BR", "ES", "AU"),
         ):
             col.button(
                 short,

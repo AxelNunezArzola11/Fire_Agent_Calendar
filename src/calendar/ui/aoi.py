@@ -658,3 +658,61 @@ def resolve_bbox(*, mode: str, region_id: str | None = None,
         point_radius=point_radius,
     )
     return resolved.bbox if resolved is not None else None
+
+
+USA_BASELINE_BBOX: tuple[float, float, float, float] = (-170.5, 18.5, -66.5, 71.5)
+USA_REGION_IDS: frozenset[str] = frozenset({"california", "conus"})
+
+
+def bbox_overlaps_usa_pilot(bbox: tuple[float, float, float, float] | None) -> bool:
+    """True when ``bbox`` is None (full archive) or intersects the 2023 USA pilot extent."""
+    if bbox is None:
+        return True
+    w, s, e, n = (float(v) for v in bbox)
+    uw, us, ue, un = USA_BASELINE_BBOX
+    return not (e < uw or w > ue or n < us or s > un)
+
+
+def is_external_aoi(
+    resolved: ResolvedAoI | dict[str, Any] | None = None,
+    *,
+    bbox: tuple[float, float, float, float] | None = None,
+    region_id: str | None = None,
+    point_radius: tuple[float, float, float] | None = None,
+) -> bool:
+    """True when the AOI targets an external region rather than the Stage 4C USA archive."""
+    rid = region_id
+    pr = point_radius
+    box = bbox
+    if isinstance(resolved, ResolvedAoI):
+        rid = rid if rid is not None else resolved.region_id
+        pr = pr if pr is not None else resolved.point_radius
+        box = box if box is not None else resolved.bbox
+    elif isinstance(resolved, dict):
+        rid = rid if rid is not None else resolved.get("region_id")
+        raw_pr = resolved.get("point_radius")
+        if pr is None and raw_pr and len(raw_pr) == 3:
+            pr = (float(raw_pr[0]), float(raw_pr[1]), float(raw_pr[2]))
+        raw_box = resolved.get("bbox")
+        if box is None and raw_box and len(raw_box) == 4:
+            box = (float(raw_box[0]), float(raw_box[1]), float(raw_box[2]), float(raw_box[3]))
+
+    rid_clean = (rid or "").strip().lower()
+    if rid_clean and rid_clean not in (
+        "custom",
+        "full",
+        "session",
+        "bbox",
+        "point_radius",
+        "map_geometry",
+        *USA_REGION_IDS,
+    ):
+        return True
+    if pr is not None and len(pr) == 3:
+        plat, plon, _ = (float(pr[0]), float(pr[1]), float(pr[2]))
+        uw, us, ue, un = USA_BASELINE_BBOX
+        if not (uw <= plon <= ue and us <= plat <= un):
+            return True
+    if box is not None and not bbox_overlaps_usa_pilot(box):
+        return True
+    return False

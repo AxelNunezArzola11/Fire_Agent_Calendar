@@ -901,6 +901,11 @@ def render_map_tab(spans: dict, cb: MapCallbacks) -> None:
                         f"Fetching NASA FIRMS ({', '.join(avail['firms_sources'])}) "
                         f"for {region_label} ({date_start}..{date_end})…"
                     ):
+                        c_lat, c_lon, r_km = (
+                            resolved.point_radius
+                            if resolved is not None and resolved.point_radius is not None and len(resolved.point_radius) == 3
+                            else (None, None, None)
+                        )
                         ds = regional.fetch_firms_regional(
                             bbox=fetch_bbox,
                             date_start=date_start,
@@ -909,6 +914,19 @@ def render_map_tab(spans: dict, cb: MapCallbacks) -> None:
                             region_label=region_label,
                             products=products,
                             satellites=satellites,
+                        )
+                        ds.center_lat = c_lat
+                        ds.center_lon = c_lon
+                        ds.radius_km = r_km
+                        ds.aoi_source = resolved.source if resolved is not None else aoi_mode
+                        regional.store_regional_dataset(
+                            ds,
+                            aoi_source=ds.aoi_source,
+                            center_lat=c_lat,
+                            center_lon=c_lon,
+                            radius_km=r_km,
+                            requested_products=products,
+                            requested_satellites=satellites,
                         )
                     st.session_state["cal_live_regional"] = ds
                     if ds.errors:

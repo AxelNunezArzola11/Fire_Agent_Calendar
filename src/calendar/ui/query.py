@@ -1068,6 +1068,68 @@ def discover_completed_exec(stage_prefix: str, filename: str) -> dict | None:
     return candidates[-1]
 
 
+def _filter_regional_df(
+    df: pd.DataFrame,
+    *,
+    bbox: tuple[float, float, float, float] | None = None,
+    products: tuple[str, ...] | None = PRODUCTS,
+    satellites: tuple[str, ...] | None = SATELLITES,
+    modis_conf_min: int | None = None,
+    viirs_conf: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=list(df.columns) if df is not None else [])
+    work = df.copy()
+    if bbox is not None:
+        w, s, e, n = (float(v) for v in bbox)
+        work = work[
+            (work["longitude"] >= w) & (work["longitude"] <= e)
+            & (work["latitude"] >= s) & (work["latitude"] <= n)
+        ]
+    if products is not None:
+        work = work[work["product"].isin(products)]
+    if satellites is not None:
+        expanded = set(_sensors.expand_satellite_aliases(satellites))
+        work = work[work["satellite"].astype(str).isin(expanded)]
+    if modis_conf_min is not None and not work.empty:
+        conf_num = pd.to_numeric(work["confidence"], errors="coerce")
+        work = work[(work["product"] != "modis") | (conf_num >= int(modis_conf_min))]
+    if viirs_conf is not None and not work.empty:
+        picked = [c for c in viirs_conf if c in VIIRS_CONFIDENCE]
+        is_viirs = work["product"].astype(str).str.startswith("viirs")
+        if picked:
+            work = work[(~is_viirs) | work["confidence"].astype(str).isin(picked)]
+        else:
+            work = work[~is_viirs]
+    return work.copy()
+
+
+def regional_duckdb_status(db_path: str | Path | None = None) -> dict:
+    """Status summary for the independent regional DuckDB archive database."""
+    from ..pipeline import regional
+
+    try:
+        path = regional.resolve_regional_db_path(db_path)
+    except Exception as exc:
+        return {"available": False, "path": "", "archives": [], "reason": str(exc)}
+    if not path.is_file():
+        return {
+            "available": True,
+            "initialized": False,
+            "path": str(path),
+            "archives": [],
+            "reason": "Initialized on first regional archive query.",
+        }
+    archives = regional.list_regional_archives(path)
+    return {
+        "available": True,
+        "initialized": True,
+        "path": str(path),
+        "archives": archives,
+        "reason": "",
+    }
+
+
 def query_regional_timeseries(
     db_path: str | None = None,
     *,
@@ -1083,35 +1145,24 @@ def query_regional_timeseries(
     viirs_conf: tuple[str, ...] | None = None,
     region_label: str = "Selected region",
     extra_df: pd.DataFrame | None = None,
+    archive_id: str | None = None,
+    region_id: str | None = None,
+    regional_db_path: str | Path | None = None,
+    allow_usa_baseline: bool | None = None,
 ) -> list[dict]:
-    """Build regional trailing baseline & anomaly series over DuckDB or live FIRMS rows."""
+    """Build regional trailing baseline & anomaly series over regional DuckDB, USA archive, or live FIRMS rows."""
     from ..pipeline import regional
+    from . import aoi
 
     if extra_df is not None:
-        df = extra_df.copy()
-        if not df.empty:
-            if bbox is not None:
-                w, s, e, n = (float(v) for v in bbox)
-                df = df[
-                    (df["longitude"] >= w) & (df["longitude"] <= e)
-                    & (df["latitude"] >= s) & (df["latitude"] <= n)
-                ]
-            if products is not None:
-                df = df[df["product"].isin(products)]
-            if satellites is not None:
-                expanded = set(_sensors.expand_satellite_aliases(satellites))
-                df = df[df["satellite"].astype(str).isin(expanded)]
-            if modis_conf_min is not None and not df.empty:
-                conf_num = pd.to_numeric(df["confidence"], errors="coerce")
-                df = df[(df["product"] != "modis") | (conf_num >= int(modis_conf_min))]
-            if viirs_conf is not None and not df.empty:
-                picked = [c for c in viirs_conf if c in VIIRS_CONFIDENCE]
-                is_viirs = df["product"].astype(str).str.startswith("viirs")
-                if picked:
-                    df = df[(~is_viirs) | df["confidence"].astype(str).isin(picked)]
-                else:
-                    df = df[~is_viirs]
-            df = df.copy()
+        df = _filter_regional_df(
+            extra_df,
+            bbox=bbox,
+            products=products,
+            satellites=satellites,
+            modis_conf_min=modis_conf_min,
+            viirs_conf=viirs_conf,
+        )
         return regional.build_regional_timeseries(
             df,
             metric=metric,
@@ -1120,8 +1171,41 @@ def query_regional_timeseries(
             date_start=date_start,
             date_end=date_end,
             region_label=region_label,
-            exec_id="firms-live",
+            exec_id=archive_id or "firms-live",
         )
+
+    external = aoi.is_external_aoi(bbox=bbox, region_id=region_id)
+    if allow_usa_baseline is False or external or archive_id:
+        reg_df = regional.query_regional_duckdb_detections(
+            archive_id=archive_id,
+            bbox=bbox,
+            date_start=date_start,
+            date_end=date_end,
+            products=products,
+            satellites=satellites,
+            db_path=regional_db_path,
+        )
+        reg_df = _filter_regional_df(
+            reg_df,
+            bbox=bbox,
+            products=products,
+            satellites=satellites,
+            modis_conf_min=modis_conf_min,
+            viirs_conf=viirs_conf,
+        )
+        if allow_usa_baseline is False or external:
+            return regional.build_regional_timeseries(
+                reg_df,
+                metric=metric,
+                scope=scope,
+                grain=grain,
+                date_start=date_start,
+                date_end=date_end,
+                region_label=region_label,
+                exec_id=archive_id or "regional-duckdb",
+            )
+    else:
+        reg_df = pd.DataFrame()
 
     start_ts, stop_ts = _day_bounds(date_start, date_end)
     where, params = _detection_where(
@@ -1130,7 +1214,7 @@ def query_regional_timeseries(
     con = _connect_duckdb(db_path)
     try:
         df = con.execute(
-            f"SELECT acquisition_timestamp_utc, product, satellite, frp "
+            f"SELECT detection_id, acquisition_timestamp_utc, product, satellite, frp, confidence, latitude, longitude, daynight "
             f"FROM detections WHERE {where} "
             f"ORDER BY acquisition_timestamp_utc",
             [start_ts, stop_ts, *params],
@@ -1139,6 +1223,15 @@ def query_regional_timeseries(
         raise DataUnavailableError(f"Regional time-series query failed: {exc}") from exc
     finally:
         con.close()
+
+    if not reg_df.empty:
+        df = (
+            pd.concat([df, reg_df], ignore_index=True)
+            .drop_duplicates(subset=["detection_id"], keep="first")
+            .sort_values("acquisition_timestamp_utc")
+            .reset_index(drop=True)
+        )
+
     return regional.build_regional_timeseries(
         df,
         metric=metric,

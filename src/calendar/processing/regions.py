@@ -112,9 +112,42 @@ CHILE = Region(
     country="Chile",
 )
 
+MEXICO = Region(
+    id="mexico",
+    bbox=(-117.12, 14.53, -86.71, 32.72),
+    crs="EPSG:4326",
+    source=("Natural Earth / INEGI approximate mainland & Baja envelope for Mexico "
+            "(NOT an official administrative boundary polygon)"),
+    version="mex_bbox_v1",
+    label="Mexico",
+    country="Mexico",
+)
+
+MADRID = Region(
+    id="madrid",
+    bbox=(-4.89, 39.52, -2.51, 41.32),
+    crs="EPSG:4326",
+    source=("Equirectangular ~100 km envelope centered on Madrid (40.42 N, 3.70 W) "
+            "(NOT an official administrative boundary polygon)"),
+    version="mad_bbox_v1",
+    label="Madrid (Spain · 100 km)",
+    country="Spain",
+)
+
 REGIONS: dict[str, Region] = {
     r.id: r
-    for r in (CALIFORNIA, BRAZIL, SPAIN, AUSTRALIA, CONUS, PORTUGAL, CANADA, CHILE)
+    for r in (
+        CALIFORNIA,
+        MADRID,
+        MEXICO,
+        BRAZIL,
+        SPAIN,
+        AUSTRALIA,
+        CONUS,
+        PORTUGAL,
+        CANADA,
+        CHILE,
+    )
 }
 
 

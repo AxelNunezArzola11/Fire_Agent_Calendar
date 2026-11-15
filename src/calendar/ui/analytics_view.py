@@ -238,6 +238,7 @@ def _active_region_context() -> dict:
             "label": resolved.label,
             "bbox": resolved.bbox,
             "source": resolved.source,
+            "point_radius": resolved.point_radius,
             "aoi_error": "",
         }
     return {
@@ -246,8 +247,80 @@ def _active_region_context() -> dict:
         "label": "CONUS / USA Archive Extent",
         "bbox": None,
         "source": "none",
+        "point_radius": None,
         "aoi_error": aoi_error,
     }
+
+
+def _safe_line_chart(st_mod, data, **kwargs) -> None:
+    fn = getattr(st_mod, "line_chart", None)
+    if callable(fn):
+        fn(data, **kwargs)
+
+
+def _safe_bar_chart(st_mod, data, **kwargs) -> None:
+    fn = getattr(st_mod, "bar_chart", None)
+    if callable(fn):
+        fn(data, **kwargs)
+
+
+def _render_distribution_charts(df: pd.DataFrame, region_label: str) -> None:
+    import streamlit as st
+
+    from ..pipeline import regional
+
+    if df is None or df.empty:
+        return
+    dist = regional.summarize_regional_distributions(df)
+    by_sat = dist["by_satellite"]
+    by_prod = dist["by_product"]
+    by_dn = dist["by_daynight"]
+    frp_bins = dist["frp_bins"]
+
+    st.write(f"#### Satellite, Sensor & FRP Distributions ({region_label})")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.caption("Detections by Satellite & Sensor")
+        if not by_sat.empty:
+            _safe_bar_chart(st, by_sat, x="satellite", y=["detections"])
+            st.dataframe(by_sat, width="stretch")
+    with c2:
+        st.caption("FRP Intensity Distribution (MW · MODIS & VIIRS separated)")
+        if not frp_bins.empty:
+            _safe_bar_chart(st, frp_bins, x="frp_bin", y=["modis", "viirs"])
+        if not by_prod.empty:
+            st.dataframe(by_prod, width="stretch")
+
+    if not by_dn.empty:
+        parts = [
+            f"`{r['daynight']}`: {int(r['detections']):,} detections ({r['frp_sum']:,.1f} MW)"
+            for _, r in by_dn.iterrows()
+        ]
+        st.caption("Day/Night split (satellite overpass flag): " + " · ".join(parts))
+
+
+def _render_regional_archives_catalog() -> None:
+    import streamlit as st
+
+    from ..pipeline import regional
+
+    archives = regional.list_regional_archives()
+    if not archives:
+        return
+    with st.expander(f"Independent Regional DuckDB Archives ({len(archives)} stored)"):
+        rows = [
+            {
+                "archive_id": a["archive_id"],
+                "region": a["region_label"],
+                "detections": a["n_detections"],
+                "min_date": a["min_date"] or "—",
+                "max_date": a["max_date"] or "—",
+                "bbox": f"{a['bbox'][0]:.2f},{a['bbox'][1]:.2f},{a['bbox'][2]:.2f},{a['bbox'][3]:.2f}",
+                "updated_utc": (a["updated_utc"] or "")[:19],
+            }
+            for a in archives
+        ]
+        st.dataframe(pd.DataFrame(rows), width="stretch")
 
 
 def _render_regional_analytics(
@@ -266,6 +339,12 @@ def _render_regional_analytics(
 
     live_ds = st.session_state.get("cal_live_regional")
     bbox = region_ctx["bbox"]
+    point_radius = region_ctx.get("point_radius")
+    c_lat, c_lon, r_km = (
+        point_radius
+        if point_radius is not None and len(point_radius) == 3
+        else (None, None, None)
+    )
     products = tuple(st.session_state.get(filters.KEY_PRODUCTS, list(query.PRODUCTS)))
     satellites = tuple(st.session_state.get(filters.KEY_SATELLITES, list(query.SATELLITES)))
     modis_conf = st.session_state.get(filters.KEY_MODIS_CONF, 0) or None
@@ -299,9 +378,28 @@ def _render_regional_analytics(
         st.error(f"Invalid analytics date range: {exc}")
         return
 
+    external_aoi = aoi_mod.is_external_aoi(
+        bbox=bbox,
+        region_id=region_ctx.get("region_id"),
+        point_radius=point_radius,
+    )
+    archive_id = (
+        regional.compute_archive_id(
+            bbox,
+            region_id=region_ctx.get("region_id"),
+            point_radius=point_radius,
+        )
+        if bbox is not None
+        else ""
+    )
+    outside_dates = is_date_range_outside_local_pilot(d_start, d_end)
+    only_noaa_selected = bool(satellites) and not any(s in ("Terra", "Aqua", "N") for s in satellites)
+    db_st = query.duckdb_status()
+
     live_matches = (
         live_ds is not None
         and (bbox is None or live_ds.bbox == bbox)
+        and (not archive_id or not getattr(live_ds, "archive_id", "") or live_ds.archive_id == archive_id)
         and live_ds.date_start == d_start
         and live_ds.date_end == d_end
     )
@@ -316,7 +414,7 @@ def _render_regional_analytics(
             "frp": "Fire Radiative Power (MW)",
         }[m],
     )
-    if live_matches:
+    if live_matches and not live_ds.df.empty:
         avail_prods = sorted({str(p) for p in live_ds.df["product"].dropna().unique()})
         avail_sats = sorted({
             sensors.canonical_satellite(str(s), product=str(p))
@@ -343,6 +441,160 @@ def _render_regional_analytics(
         key="cal_an_reg_grain",
     )
 
+    # Decide between pinned 2023 USA Stage 4C local archive vs independent regional DuckDB + NASA FIRMS
+    use_regional_archive = (
+        bbox is not None
+        and (external_aoi or outside_dates or only_noaa_selected or not db_st["available"])
+    )
+
+    ds: regional.RegionalDataset | None = None
+    refresh_requested = False
+    if bbox is not None and firms_ready:
+        refresh_requested = bool(
+            st.button(
+                f"Refresh Regional Archive from NASA FIRMS ({d_start} to {d_end})",
+                key="cal_an_fetch_firms",
+            )
+        )
+
+    if use_regional_archive and bbox is not None:
+        if live_matches and not refresh_requested:
+            ds = live_ds
+        else:
+            cached_ds = None
+            if not refresh_requested:
+                cached_ds, _cov = regional.load_regional_dataset(
+                    archive_id,
+                    bbox=bbox,
+                    date_start=d_start,
+                    date_end=d_end,
+                    products=products,
+                    satellites=satellites,
+                    region_id=region_ctx.get("region_id") or region_ctx["mode"],
+                    region_label=region_ctx["label"],
+                    center_lat=c_lat,
+                    center_lon=c_lon,
+                    radius_km=r_km,
+                    aoi_source=region_ctx.get("source") or region_ctx["mode"],
+                )
+            if cached_ds is not None and not refresh_requested:
+                ds = cached_ds
+            else:
+                with st.spinner(
+                    f"Populating independent regional DuckDB archive `{archive_id}` "
+                    f"from NASA FIRMS ({d_start}..{d_end})…"
+                ):
+                    ds = regional.ensure_regional_archive_data(
+                        bbox=bbox,
+                        date_start=d_start,
+                        date_end=d_end,
+                        region_id=region_ctx.get("region_id") or region_ctx["mode"],
+                        region_label=region_ctx["label"],
+                        products=products,
+                        satellites=satellites,
+                        center_lat=c_lat,
+                        center_lon=c_lon,
+                        radius_km=r_km,
+                        aoi_source=region_ctx.get("source") or region_ctx["mode"],
+                        force_refresh=refresh_requested,
+                    )
+        if ds is not None and ds.data_origin != "unavailable":
+            st.session_state["cal_live_regional"] = ds
+
+        avail = sensors.evaluate_availability(
+            d_start,
+            d_end,
+            products,
+            satellites,
+            firms_key_configured=firms_ready,
+            region_label=region_ctx["label"],
+            live_dataset=ds,
+        )
+        reg_db_path = regional.resolve_regional_db_path()
+        if ds.data_origin == "firms_live_api":
+            st.success(
+                f"Data origin: **Newly retrieved NASA FIRMS API -> Independent Regional DuckDB Archive** · "
+                f"Archive: `{ds.archive_id}` · Exec: `{ds.exec_id[:8]}` · Region: **{ds.region_label}** · "
+                f"Window: `{d_start}` to `{d_end}` · Sources: `{', '.join(ds.sources) or 'none'}` · "
+                f"{ds.n_detections:,} normalized detections stored in `{reg_db_path.name}`."
+            )
+        elif ds.data_origin == "regional_duckdb_archive":
+            st.success(
+                f"Data origin: **Independent Regional DuckDB Archive (Previously Archived)** · "
+                f"Archive: `{ds.archive_id}` · Exec: `{ds.exec_id[:8]}` · Region: **{ds.region_label}** · "
+                f"Window: `{d_start}` to `{d_end}` · {ds.n_detections:,} detections."
+            )
+        else:
+            st.warning(
+                f"Data origin: **Unavailable for `{ds.archive_id}`** — "
+                + ("; ".join(ds.errors) if ds.errors else "No regional archive or live FIRMS data available.")
+            )
+            for note in avail["sensor_notes"]:
+                st.info(note)
+            _render_regional_archives_catalog()
+            st.info(METHODOLOGY_NOTE)
+            return
+
+        if ds.errors:
+            st.warning("; ".join(ds.errors))
+        for note in avail["sensor_notes"]:
+            st.info(note)
+
+        filtered_df = query._filter_regional_df(
+            ds.df,
+            bbox=ds.bbox,
+            products=products,
+            satellites=satellites,
+            modis_conf_min=modis_conf,
+            viirs_conf=viirs_conf,
+        )
+        if filtered_df.empty:
+            st.info(
+                f"Regional archive `{ds.archive_id}` (**{ds.region_label}**) contains **0 matching detections** "
+                f"across `{d_start}` to `{d_end}` (sources checked: `{', '.join(ds.sources) or 'none'}`). "
+                "Zero observations are recorded honestly without backfilling from the Stage 4C USA baseline."
+            )
+            _render_regional_archives_catalog()
+            st.info(METHODOLOGY_NOTE)
+            return
+
+        m_cols = st.columns(4)
+        modis_part = filtered_df[filtered_df["product"].astype(str) == "modis"]
+        viirs_part = filtered_df[filtered_df["product"].astype(str).str.startswith("viirs")]
+        m_cols[0].metric("Filtered Observations", f"{len(filtered_df):,}")
+        m_cols[1].metric("Active Days", f"{filtered_df['acquisition_timestamp_utc'].astype(str).str.slice(0, 10).nunique()}")
+        m_cols[2].metric(
+            "MODIS (Terra+Aqua)",
+            f"{len(modis_part):,} ({pd.to_numeric(modis_part['frp'], errors='coerce').fillna(0).sum():,.1f} MW)",
+        )
+        m_cols[3].metric(
+            "VIIRS (S-NPP/NOAA)",
+            f"{len(viirs_part):,} ({pd.to_numeric(viirs_part['frp'], errors='coerce').fillna(0).sum():,.1f} MW)",
+        )
+
+        rows = query.query_regional_timeseries(
+            date_start=d_start,
+            date_end=d_end,
+            bbox=ds.bbox,
+            metric=metric,
+            scope=scope,
+            grain=grain,
+            products=products,
+            satellites=satellites,
+            modis_conf_min=modis_conf,
+            viirs_conf=viirs_conf,
+            region_label=ds.region_label,
+            extra_df=ds.df,
+            archive_id=ds.archive_id,
+            region_id=ds.region_id,
+            allow_usa_baseline=False,
+        )
+        _render_charts_and_notables(rows, show_baseline_warning=False)
+        _render_distribution_charts(filtered_df, ds.region_label)
+        _render_regional_archives_catalog()
+        return
+
+    # USA 2023 baseline local DuckDB path
     avail = sensors.evaluate_availability(
         d_start,
         d_end,
@@ -352,49 +604,10 @@ def _render_regional_analytics(
         region_label=region_ctx["label"],
         live_dataset=live_ds if live_matches else None,
     )
-
-    if live_matches:
-        st.success(
-            f"Data origin: **Newly retrieved NASA FIRMS API** · Region: **{live_ds.region_label}** · "
-            f"Window: `{d_start}` to `{d_end}` · Exec `{live_ds.exec_id[:8]}` · "
-            f"Sources: `{', '.join(live_ds.sources) or 'none'}` · "
-            f"{live_ds.n_detections:,} normalized detections."
-        )
-        if live_ds.errors:
-            st.warning("; ".join(live_ds.errors))
-        for note in avail["sensor_notes"]:
-            st.info(note)
-        if live_ds.n_detections == 0:
-            st.info(
-                f"NASA FIRMS returned **0 detections** for **{live_ds.region_label}** across "
-                f"`{d_start}` to `{d_end}` (sources checked: `{', '.join(live_ds.sources) or 'none'}`). "
-                "Zero observations are reported directly without fabricating activity."
-            )
-            st.info(METHODOLOGY_NOTE)
-            return
-        rows = query.query_regional_timeseries(
-            date_start=d_start,
-            date_end=d_end,
-            bbox=live_ds.bbox,
-            metric=metric,
-            scope=scope,
-            grain=grain,
-            products=products,
-            satellites=satellites,
-            modis_conf_min=modis_conf,
-            viirs_conf=viirs_conf,
-            region_label=live_ds.region_label,
-            extra_df=live_ds.df,
-        )
-        _render_charts_and_notables(rows, show_baseline_warning=False)
-        return
-
-    # Local DuckDB path (available only within local archive span and pre-indexed sensors)
-    outside_dates = is_date_range_outside_local_pilot(d_start, d_end)
-    only_noaa_selected = bool(satellites) and not any(s in ("Terra", "Aqua", "N") for s in satellites)
-    db_st = query.duckdb_status()
+    if refresh_requested and live_ds is not None and live_matches:
+        st.info("Live NASA FIRMS refresh requested for USA AOI.")
     local_n = 0
-    if db_st["available"] and not outside_dates and not only_noaa_selected:
+    if db_st["available"] and not outside_dates and not only_noaa_selected and not external_aoi:
         local_n = query.count_detections(
             date_start=d_start,
             date_end=d_end,
@@ -405,82 +618,30 @@ def _render_regional_analytics(
             viirs_conf=viirs_conf,
         )
 
-    def _render_firms_fetch_controls(prompt_reason: str) -> None:
-        st.info(prompt_reason)
-        for note in avail["sensor_notes"]:
-            st.warning(note)
-        if bbox is None:
-            st.warning(
-                "Select a Geographic area of interest in the sidebar (named region, point + radius, "
-                "custom bbox, or saved area) before retrieving live NASA FIRMS observations."
-            )
-            return
-        if not firms_ready:
-            st.warning(
-                "Missing configuration: `FIRMS_MAP_KEY` is required in `.env` or Streamlit Secrets "
-                "to retrieve NASA FIRMS data beyond the local 2023 USA archive."
-            )
-            return
-        if not avail["firms_sources"]:
-            st.warning(
-                "No NASA FIRMS source supports this combination of dates and selected satellites."
-            )
-            return
-        btn_label = f"Retrieve & Analyze NASA FIRMS ({d_start} to {d_end})"
-        if st.button(btn_label, key="cal_an_fetch_firms"):
-            try:
-                with st.spinner(
-                    f"Retrieving NASA FIRMS ({', '.join(avail['firms_sources'])}) "
-                    f"for {region_ctx['label']} ({d_start}..{d_end})…"
-                ):
-                    ds = regional.fetch_firms_regional(
-                        bbox=bbox,
-                        date_start=d_start,
-                        date_end=d_end,
-                        region_id=region_ctx["region_id"] or region_ctx["mode"],
-                        region_label=region_ctx["label"],
-                        products=products,
-                        satellites=satellites,
-                    )
-                st.session_state["cal_live_regional"] = ds
-                st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
-
     if local_n == 0:
-        if outside_dates:
-            reason = (
-                f"Window `{d_start}` to `{d_end}` is outside the local 2023 USA DuckDB archive "
-                "(2023-01-01 to 2023-12-31). Multi-year data can be retrieved directly from NASA FIRMS "
-                f"for `{', '.join(avail['firms_sources']) or 'supported sensors'}` without reusing 2023 observations."
-            )
-        elif only_noaa_selected:
-            reason = (
-                "Selected NOAA-20 / NOAA-21 sensors are not stored in the local 2023 DuckDB file; "
-                "retrieve their NASA FIRMS records directly below."
+        if bbox is None and outside_dates:
+            st.info(
+                f"Window `{d_start}` to `{d_end}` is outside the pinned 2023 USA archive. "
+                "Select a Geographic area of interest in the sidebar to retrieve global/multi-year NASA FIRMS data."
             )
         elif not db_st["available"]:
-            reason = (
-                f"Local DuckDB archive unavailable ({db_st['status']}: {db_st['reason']}). "
-                "Retrieve regional/multi-year observations directly via NASA FIRMS below."
+            st.warning(
+                f"Local Stage 4C USA DuckDB archive unavailable ({db_st['status']}: {db_st['reason']}). "
+                "Select a Geographic area of interest in the sidebar to query independent regional DuckDB + NASA FIRMS."
             )
         else:
-            reason = (
-                f"**{region_ctx['label']}** has **0 recorded observations** in the local DuckDB archive "
-                f"for `{d_start}` to `{d_end}`. External regions are never backfilled from USA data."
+            st.info(
+                f"**{region_ctx['label']}** has **0 matching observations** in the pinned 2023 USA archive "
+                f"for `{d_start}` to `{d_end}`."
             )
-        _render_firms_fetch_controls(reason)
+        _render_regional_archives_catalog()
         st.info(METHODOLOGY_NOTE)
         return
 
     st.caption(
-        f"Data origin: **Local DuckDB archive** · **{region_ctx['label']}** · {local_n:,} detections "
-        f"(`{d_start}` to `{d_end}`)."
+        f"Data origin: **Pinned Stage 4C / Phase 1D USA DuckDB Archive** · **{region_ctx['label']}** · "
+        f"{local_n:,} detections (`{d_start}` to `{d_end}`)."
     )
-    if firms_ready and any(s in satellites for s in ("NOAA-20", "NOAA-21")):
-        _render_firms_fetch_controls(
-            "Local DuckDB contains MODIS & VIIRS S-NPP for 2023; fetch live NASA FIRMS to include NOAA-20 / NOAA-21 in this window."
-        )
     rows = query.query_regional_timeseries(
         date_start=d_start,
         date_end=d_end,
@@ -495,6 +656,7 @@ def _render_regional_analytics(
         region_label=region_ctx["label"],
     )
     _render_charts_and_notables(rows, show_baseline_warning=False)
+    _render_regional_archives_catalog()
 
 
 def _render_charts_and_notables(
@@ -546,14 +708,14 @@ def _render_charts_and_notables(
     if len(chart) == 1:
         # Single-period selection: render bar metrics so one point is never an invisible line
         single_cols = ["observed"] + (["baseline"] if base_valid > 0 else [])
-        st.bar_chart(chart, x="period", y=single_cols)
+        _safe_bar_chart(st, chart, x="period", y=single_cols)
         st.caption(
             "Single-period window shown as comparison bars. Widen the Historical Analytics "
             "date range above to display a multi-period time-series trend."
         )
     else:
         y_cols = ["observed", "baseline"] if base_valid > 0 else ["observed"]
-        st.line_chart(chart, x="period", y=y_cols)
+        _safe_line_chart(st, chart, x="period", y=y_cols)
         st.caption(
             "Baseline gaps = periods without an eligible baseline (n < 3 prior slots; "
             "never drawn artificially)."
@@ -561,10 +723,7 @@ def _render_charts_and_notables(
 
     if z_valid > 0:
         st.write("#### Statistical Deviation (Z-Score)")
-        if len(chart) == 1:
-            st.bar_chart(chart, x="period", y=["z_score"])
-        else:
-            st.bar_chart(chart, x="period", y=["z_score"])
+        _safe_bar_chart(st, chart, x="period", y=["z_score"])
         st.caption(
             "Z-score shown only when n >= 7 prior periods with non-zero variance "
             "(classify_v1 notable gate: |z| >= 2.0 and |pct| >= 25%)."
@@ -646,7 +805,7 @@ def render_analytics_tab(records: list[dict] | None = None) -> None:
                 f"- How to configure: {anom_st['remediation']}\n\n"
                 "No anomaly scores or baselines are fabricated when Stage 4C outputs are absent or incomplete."
             )
-            if dynamic_available:
+            if dynamic_available and needs_dynamic:
                 st.info("Multi-year / regional DuckDB & NASA FIRMS analytics remain available below.")
             else:
                 st.info(METHODOLOGY_NOTE)
@@ -658,7 +817,7 @@ def render_analytics_tab(records: list[dict] | None = None) -> None:
         except FileNotFoundError as exc:
             st.warning("Historical anomaly output unavailable.")
             st.info(f"{exc}. No anomalies are fabricated when Stage 4C outputs are absent.")
-            if not dynamic_available:
+            if not (dynamic_available and needs_dynamic):
                 st.info(METHODOLOGY_NOTE)
                 return
             records = []

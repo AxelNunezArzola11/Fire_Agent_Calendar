@@ -606,3 +606,179 @@ def test_granite_pipeline_automatic_aoi_and_end_to_end_stages():
     assert by_name["export"].status == "ok"
     assert by_name["metrics"].status == "ok"
     conn.close()
+
+
+def test_independent_regional_duckdb_madrid_mexico_brazil_australia(tmp_path, monkeypatch):
+    import duckdb as _duckdb
+    from src.calendar import settings as _settings
+
+    reg_db = tmp_path / "regional_archives" / "regional.duckdb"
+    monkeypatch.setattr(_settings, "CAL_REGIONAL_DUCKDB_PATH", str(reg_db))
+
+    # Regions registry includes Madrid and Mexico alongside Brazil and Australia
+    for rid in ("madrid", "mexico", "brazil", "australia", "california"):
+        assert rid in regions.REGIONS
+
+    # External AOI classifier keeps Mexico, Madrid, Brazil, Australia strictly separate from USA
+    madrid_pr = (40.42, -3.70, 100.0)
+    madrid_bbox = aoi.radius_bbox(*madrid_pr)
+    assert aoi.is_external_aoi(bbox=madrid_bbox, point_radius=madrid_pr) is True
+    assert aoi.is_external_aoi(bbox=regions.MEXICO.bbox, region_id="mexico") is True
+    assert aoi.is_external_aoi(bbox=regions.BRAZIL.bbox, region_id="brazil") is True
+    assert aoi.is_external_aoi(bbox=regions.AUSTRALIA.bbox, region_id="australia") is True
+    assert aoi.is_external_aoi(bbox=regions.CALIFORNIA.bbox, region_id="california") is False
+
+    # Archive IDs are deterministic and distinct
+    mad_id = regional.compute_archive_id(madrid_bbox, point_radius=madrid_pr)
+    mex_id = regional.compute_archive_id(regions.MEXICO.bbox, region_id="mexico")
+    bra_id = regional.compute_archive_id(regions.BRAZIL.bbox, region_id="brazil")
+    aus_id = regional.compute_archive_id(regions.AUSTRALIA.bbox, region_id="australia")
+    assert mad_id == "pt_40.42_-3.70_100.0km"
+    assert (mex_id, bra_id, aus_id) == ("reg_mexico", "reg_brazil", "reg_australia")
+
+    # Mock FIRMS feed tailored to regional coordinates (Madrid, Mexico, Brazil, Australia)
+    regional_points = {
+        "madrid": (40.45, -3.65, "2023-01-15", "28.4", "MODIS_SP", "Terra", "MODIS", "88"),
+        "mexico": (19.50, -99.10, "2023-01-16", "41.2", "VIIRS_SNPP_SP", "N", "VIIRS", "h"),
+        "brazil": (-12.50, -55.20, "2023-01-17", "95.0", "MODIS_SP", "Aqua", "MODIS", "92"),
+        "australia": (-33.50, 150.80, "2023-01-18", "120.5", "VIIRS_NOAA20_SP", "NOAA-20", "VIIRS", "h"),
+    }
+
+    fetch_calls: list[tuple[str, str]] = []
+
+    def fake_fetch(source, bbox_str, days, end_d, *, key=None):
+        _ = (days, end_d, key)
+        fetch_calls.append((source, bbox_str))
+        w, s, e, n = (float(x) for x in bbox_str.split(","))
+        lines = ["latitude,longitude,brightness,scan,track,acq_date,acq_time,satellite,instrument,confidence,version,bright_t31,frp,daynight"]
+        for _tag, (lat, lon, dt_s, frp_s, exp_src, sat, inst, conf) in regional_points.items():
+            if w <= lon <= e and s <= lat <= n and source == exp_src:
+                lines.append(f"{lat},{lon},325.0,1.0,1.0,{dt_s},1330,{sat},{inst},{conf},6.1,295.0,{frp_s},D")
+        content = ("\n".join(lines) + "\n").encode("utf-8") if len(lines) > 1 else b""
+        req = nrt.AreaRequest(source, bbox_str, 41, date(2023, 1, 1))
+        return [
+            nrt.ChunkResult(
+                request=req,
+                content=content,
+                sha256="b" * 64,
+                status="ok" if content else "empty",
+                attempts=1,
+                elapsed_s=0.01,
+                fetched_at="2023-02-11T00:00:00+00:00",
+            )
+        ]
+
+    # Populate Madrid point+radius automatically on empty regional archive
+    ds_mad = regional.ensure_regional_archive_data(
+        bbox=madrid_bbox,
+        date_start="2023-01-01",
+        date_end="2023-02-10",
+        region_id="point_radius",
+        region_label="Point (40.42, -3.70) + 100.0 km",
+        center_lat=40.42,
+        center_lon=-3.70,
+        radius_km=100.0,
+        aoi_source="point_radius",
+        products=("modis", "viirs-snpp"),
+        key="DUMMY-MAP-KEY",
+        fetcher=fake_fetch,
+        db_path=reg_db,
+    )
+    assert ds_mad.data_origin == "firms_live_api"
+    assert ds_mad.archive_id == mad_id
+    assert ds_mad.archive_status == "populated_from_firms"
+    assert ds_mad.n_detections == 1
+    assert ds_mad.df.iloc[0]["firms_source"] == "MODIS_SP"
+
+    # Second call with no API key loads directly from independent regional DuckDB archive
+    fetch_calls.clear()
+    ds_mad_cached = regional.ensure_regional_archive_data(
+        bbox=madrid_bbox,
+        date_start="2023-01-01",
+        date_end="2023-02-10",
+        region_id="point_radius",
+        region_label="Point (40.42, -3.70) + 100.0 km",
+        center_lat=40.42,
+        center_lon=-3.70,
+        radius_km=100.0,
+        aoi_source="point_radius",
+        products=("modis", "viirs-snpp"),
+        key="",
+        db_path=reg_db,
+    )
+    assert ds_mad_cached.data_origin == "regional_duckdb_archive"
+    assert ds_mad_cached.archive_id == mad_id
+    assert ds_mad_cached.n_detections == 1
+    assert fetch_calls == []
+
+    # Populate Mexico, Brazil, Australia without mixing observations or touching calendar.duckdb
+    for rid, reg in (("mexico", regions.MEXICO), ("brazil", regions.BRAZIL), ("australia", regions.AUSTRALIA)):
+        ds_r = regional.ensure_regional_archive_data(
+            bbox=reg.bbox,
+            date_start="2023-01-01",
+            date_end="2023-02-10",
+            region_id=rid,
+            region_label=reg.label,
+            key="DUMMY-MAP-KEY",
+            fetcher=fake_fetch,
+            db_path=reg_db,
+        )
+        assert ds_r.n_detections == 1
+        assert ds_r.archive_id == f"reg_{rid}"
+
+    archives = {a["archive_id"]: a for a in regional.list_regional_archives(reg_db)}
+    assert {mad_id, mex_id, bra_id, aus_id}.issubset(archives)
+    assert archives[mad_id]["center_lat"] == 40.42 and archives[mad_id]["radius_km"] == 100.0
+
+    # Verify table schemas and non-duplication when forcing a repeat store over same window
+    con = _duckdb.connect(str(reg_db), read_only=True)
+    try:
+        tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+        assert {"regional_archives", "regional_acquisitions", "regional_detections"}.issubset(tables)
+        mad_rows = con.execute("SELECT COUNT(*) FROM regional_detections WHERE archive_id = ?", [mad_id]).fetchone()[0]
+        assert mad_rows == 1
+    finally:
+        con.close()
+
+    dup_info = regional.store_regional_dataset(ds_mad, db_path=reg_db)
+    assert dup_info["inserted"] == 0 and dup_info["skipped_duplicates"] == 1
+
+    # Query layer for Mexico NEVER leaks USA baseline calendar.duckdb detections
+    mex_ts = query.query_regional_timeseries(
+        date_start="2023-01-01",
+        date_end="2023-02-10",
+        bbox=regions.MEXICO.bbox,
+        region_id="mexico",
+        region_label="Mexico",
+        archive_id="reg_mexico",
+        regional_db_path=reg_db,
+    )
+    assert len(mex_ts) == 41
+    assert sum(r["observed_value"] for r in mex_ts) == 1
+
+    # Uncached archive without API key fails honestly (unavailable, never USA fallback)
+    uncached = regional.ensure_regional_archive_data(
+        bbox=(10.0, 45.0, 12.0, 47.0),
+        date_start="2024-06-01",
+        date_end="2024-06-05",
+        region_id="custom",
+        region_label="Alps Test",
+        key="",
+        db_path=reg_db,
+    )
+    assert uncached.data_origin == "unavailable"
+    assert uncached.archive_status == "unavailable_no_api_key"
+    assert uncached.n_detections == 0
+
+    # Distribution summarizer separates MODIS & VIIRS and builds FRP bins
+    combined_df = pd.concat([ds_mad.df, ds_mad.df.assign(
+        detection_id="v1", product="viirs-snpp", sensor="snpp", satellite="N", instrument="VIIRS", frp=60.0
+    )], ignore_index=True)
+    dist = regional.summarize_regional_distributions(combined_df)
+    assert set(dist["by_product"]["product"]) == {"modis", "viirs-snpp"}
+    assert dist["frp_bins"]["modis"].sum() == 1
+    assert dist["frp_bins"]["viirs"].sum() == 1
+    # Refuses to point regional DuckDB to pinned Stage 4C USA baseline
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        regional.resolve_regional_db_path("calendar.duckdb")
