@@ -96,7 +96,8 @@ def event_report_markdown(event: dict, *, transitions=(), alerts=(),
         "- Alert severity bands are retrospective percentiles over the "
         "available population, not validated real-time signals "
         "(Spike/High-FRP alerts).",
-        "- Pilot year 2023 only; methods are deterministic and versioned, "
+        "- Multi-year & multi-sensor support (local 2023 USA archive + live NASA FIRMS "
+        "MODIS/VIIRS S-NPP/NOAA-20/NOAA-21); methods are deterministic and versioned, "
         "not autonomous agent judgments.",
         "",
         "## How to cite",

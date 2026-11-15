@@ -27,7 +27,7 @@ from datetime import date, datetime, timedelta, timezone
 import pandas as pd
 
 from .. import settings
-from ..acquisition import nrt
+from ..acquisition import nrt, sensors
 from ..analytics import anomalies, baselines
 from ..experimental.frp_operator_pilot import (
     operator as oop,
@@ -37,7 +37,18 @@ from ..experimental.frp_operator_pilot import (
 from ..processing import normalize
 from ..ui import filters
 
-MAX_LIVE_FIRMS_DAYS = 15
+MAX_LIVE_FIRMS_DAYS = 60
+
+
+def max_live_firms_days() -> int:
+    """Configured max day span per live FIRMS request (default 60)."""
+    raw = settings.get_setting("CAL_FIRMS_MAX_DAYS", str(MAX_LIVE_FIRMS_DAYS))
+    try:
+        val = int(raw)
+        return max(1, min(val, 366))
+    except (TypeError, ValueError):
+        return MAX_LIVE_FIRMS_DAYS
+
 
 SOURCE_METADATA: dict[str, tuple[str, str]] = {
     "MODIS_NRT": ("modis", "terra_aqua"),
@@ -77,28 +88,56 @@ class RegionalDataset:
         return int(len(self.df))
 
 
+def select_firms_sources_with_notes(
+    date_start: str,
+    date_end: str,
+    *,
+    products: tuple[str, ...] = sensors.ALL_PRODUCTS,
+    satellites: tuple[str, ...] | None = None,
+    include_noaa20: bool = False,
+    include_noaa21: bool = False,
+    availability: dict[str, dict[str, str]] | None = None,
+    today_utc: date | None = None,
+) -> tuple[tuple[str, ...], list[str]]:
+    """Choose SP and/or NRT NASA FIRMS Area API sources + availability notes."""
+    chosen_products = list(products) if products is not None else list(sensors.ALL_PRODUCTS)
+    if include_noaa20 and "viirs-noaa20" not in chosen_products:
+        chosen_products.append("viirs-noaa20")
+    if include_noaa21 and "viirs-noaa21" not in chosen_products:
+        chosen_products.append("viirs-noaa21")
+    return sensors.select_firms_sources_for_range(
+        date_start,
+        date_end,
+        products=tuple(chosen_products),
+        satellites=satellites,
+        availability=availability,
+        today_utc=today_utc,
+    )
+
+
 def select_firms_sources(
     date_start: str,
     date_end: str,
     *,
-    products: tuple[str, ...] = ("modis", "viirs-snpp"),
+    products: tuple[str, ...] = sensors.ALL_PRODUCTS,
+    satellites: tuple[str, ...] | None = None,
     include_noaa20: bool = False,
+    include_noaa21: bool = False,
+    availability: dict[str, dict[str, str]] | None = None,
     today_utc: date | None = None,
 ) -> tuple[str, ...]:
-    """Choose NRT vs Standard (SP) Area API sources based on date recency."""
-    today = today_utc or datetime.now(timezone.utc).date()
-    end_d = date.fromisoformat(date_end)
-    _ = date.fromisoformat(date_start)
-    use_nrt = (today - end_d).days <= NRT_WINDOW_DAYS
-    suffix = "NRT" if use_nrt else "SP"
-    out: list[str] = []
-    if not products or "modis" in products:
-        out.append(f"MODIS_{suffix}")
-    if not products or "viirs-snpp" in products:
-        out.append(f"VIIRS_SNPP_{suffix}")
-    if include_noaa20 or "viirs-noaa20" in products:
-        out.append(f"VIIRS_NOAA20_{suffix}")
-    return tuple(out) or (f"MODIS_{suffix}", f"VIIRS_SNPP_{suffix}")
+    """Choose NRT and/or Standard (SP) Area API sources based on dates and sensors."""
+    sources, _notes = select_firms_sources_with_notes(
+        date_start,
+        date_end,
+        products=products,
+        satellites=satellites,
+        include_noaa20=include_noaa20,
+        include_noaa21=include_noaa21,
+        availability=availability,
+        today_utc=today_utc,
+    )
+    return sources
 
 
 def _execution_hash(
@@ -132,7 +171,9 @@ def fetch_firms_regional(
     region_id: str = "custom",
     region_label: str = "Custom region",
     sources: tuple[str, ...] | None = None,
-    products: tuple[str, ...] = ("modis", "viirs-snpp"),
+    products: tuple[str, ...] = sensors.ALL_PRODUCTS,
+    satellites: tuple[str, ...] | None = None,
+    availability: dict[str, dict[str, str]] | None = None,
     key: str | None = None,
     fetcher=None,
 ) -> RegionalDataset:
@@ -149,16 +190,29 @@ def fetch_firms_regional(
     start_d = date.fromisoformat(start_s)
     end_d = date.fromisoformat(end_s)
     span_days = (end_d - start_d).days + 1
-    if span_days > MAX_LIVE_FIRMS_DAYS:
+    max_days = max_live_firms_days()
+    if span_days > max_days:
         raise ValueError(
-            f"Live NASA FIRMS Area API retrieval is capped at {MAX_LIVE_FIRMS_DAYS} days "
+            f"Live NASA FIRMS Area API retrieval is capped at {max_days} days "
             f"per request (requested {span_days} days) to respect API limits."
         )
 
     w, s, e, n = (float(v) for v in bbox)
     bbox_str = f"{w:.5f},{s:.5f},{e:.5f},{n:.5f}"
-    chosen_sources = sources or select_firms_sources(start_s, end_s, products=products)
     map_key = key if key is not None else settings.get_setting("FIRMS_MAP_KEY", "")
+    avail_map = availability
+    if avail_map is None and sources is None and fetcher is None and map_key:
+        avail_map = sensors.probe_firms_availability(map_key)
+    if sources is not None:
+        chosen_sources, source_notes = tuple(sources), []
+    else:
+        chosen_sources, source_notes = select_firms_sources_with_notes(
+            start_s,
+            end_s,
+            products=products,
+            satellites=satellites,
+            availability=avail_map,
+        )
     retrieved = datetime.now(timezone.utc).isoformat()
     exec_tag = _execution_hash((w, s, e, n), start_s, end_s, chosen_sources, [])
 
@@ -175,11 +229,31 @@ def fetch_firms_regional(
             retrieved_utc=retrieved,
             df=pd.DataFrame(columns=list(normalize.CANONICAL)),
             errors=[
-                "FIRMS_MAP_KEY is not configured; live global NASA FIRMS retrieval "
-                "is unavailable in this deployment."
+                "FIRMS_MAP_KEY is not configured; live NASA FIRMS retrieval "
+                "across multi-year and global datasets is unavailable in this deployment."
             ],
             limitations=[
                 "No live NASA FIRMS request was executed without FIRMS_MAP_KEY.",
+                *source_notes,
+            ],
+        )
+
+    if not chosen_sources:
+        return RegionalDataset(
+            exec_id=exec_tag,
+            region_id=region_id,
+            region_label=region_label,
+            bbox=(w, s, e, n),
+            date_start=start_s,
+            date_end=end_s,
+            data_origin="firms_live_api",
+            sources=(),
+            retrieved_utc=retrieved,
+            df=pd.DataFrame(columns=list(normalize.CANONICAL)),
+            errors=[],
+            limitations=[
+                "No NASA FIRMS sources cover the selected date range and satellites.",
+                *source_notes,
             ],
         )
 
@@ -190,7 +264,11 @@ def fetch_firms_regional(
     rejected_total = 0
     errors: list[str] = []
 
-    for src in chosen_sources:
+    ordered_sources = sorted(
+        chosen_sources,
+        key=lambda src_name: (0 if src_name.endswith("_SP") else 1, chosen_sources.index(src_name)),
+    )
+    for src in ordered_sources:
         product, sensor = SOURCE_METADATA.get(src, ("unknown", "unknown"))
         try:
             chunks = range_fn(src, bbox_str, span_days, end_d, key=map_key)
@@ -227,7 +305,11 @@ def fetch_firms_regional(
                 )
                 rejected_total += len(batch.rejected)
                 if not batch.accepted.empty:
-                    frames.append(batch.accepted)
+                    acc = batch.accepted.copy()
+                    acc["satellite"] = acc["satellite"].map(
+                        lambda s_val, _prod=product: sensors.canonical_satellite(s_val, product=_prod)
+                    )
+                    frames.append(acc)
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{src} parse/normalize: {exc}")
 
@@ -242,9 +324,18 @@ def fetch_firms_regional(
             & (merged["latitude"] >= s)
             & (merged["latitude"] <= n)
         )
+        if products is not None:
+            mask &= merged["product"].isin(products)
+        if satellites is not None:
+            allowed_sats = {sensors.canonical_satellite(s_val) for s_val in satellites} | set(satellites)
+            mask &= merged["satellite"].isin(allowed_sats)
         merged = (
             merged.loc[mask]
             .drop_duplicates(subset=["detection_id"])
+            .drop_duplicates(
+                subset=["product", "satellite", "acquisition_timestamp_utc", "latitude", "longitude"],
+                keep="first",
+            )
             .sort_values(["frp", "detection_id"], ascending=[False, True], na_position="last")
             .reset_index(drop=True)
         )
@@ -267,9 +358,10 @@ def fetch_firms_regional(
         rejected_count=rejected_total,
         errors=errors,
         limitations=[
-            "Newly retrieved NASA FIRMS detections are session-scoped and distinct "
-            "from the pinned 2023 USA pilot archive.",
+            "Newly retrieved NASA FIRMS detections preserve source SP/NRT provenance and "
+            "remain distinct from the pre-indexed local archive.",
             "MODIS and VIIRS detections and FRP values remain sensor-separated.",
+            *source_notes,
         ],
     )
 
@@ -342,8 +434,9 @@ def build_regional_timeseries(
         work = work.dropna(subset=["_period"])
         if scope in ("modis", "viirs-snpp", "viirs-noaa20", "viirs-noaa21"):
             work = work[work["product"] == scope]
-        elif scope in ("Terra", "Aqua", "N"):
-            work = work[work["satellite"] == scope]
+        elif scope in ("Terra", "Aqua", "N", "NOAA-20", "NOAA-21"):
+            aliases = set(sensors.SATELLITE_ALIASES.get(scope, (scope,)))
+            work = work[work["satellite"].astype(str).isin(aliases)]
         elif metric == "frp" and scope == "raw":
             pass
     else:
@@ -395,8 +488,18 @@ def run_operator_on_frame(df: pd.DataFrame) -> dict:
     for row in df.to_dict("records"):
         verdict = oop_validation.validate_row(row)
         if not verdict["eligible"]:
+            reasons = list(verdict["reasons"])
+            prod = row.get("product")
+            if prod in ("viirs-noaa20", "viirs-noaa21"):
+                reasons = [
+                    f"no published Observation Operator coefficients for {prod} "
+                    "(Sofiev & Kouznetsov 2026 covers MODIS & VIIRS S-NPP)"
+                    if r.startswith("unknown product")
+                    else r
+                    for r in reasons
+                ]
             records.append(
-                oor.result_record(row, None, None, reasons=tuple(verdict["reasons"]))
+                oor.result_record(row, None, None, reasons=tuple(reasons))
             )
             continue
         calc = oop.expected_frp(row["frp"], verdict["area"], row["product"], row["daynight"])

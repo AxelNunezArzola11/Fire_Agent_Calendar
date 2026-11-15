@@ -119,12 +119,12 @@ class TestPeriodMath:
         bad = filters.FilterState(grain="hourly", period="junk",
                                   date_start="2023-05-01", date_end="2023-04-01",
                                   products=("modis", "landsat"),
-                                  satellites=("Terra", "NOAA-20"), mode="events")
+                                  satellites=("Terra", "GOES-16"), mode="events")
         errors = filters.validate(bad)
         assert any("grain" in e for e in errors)
         assert any("mode" in e for e in errors)
         assert any("landsat" in e for e in errors)
-        assert any("NOAA-20" in e for e in errors)
+        assert any("GOES-16" in e for e in errors)
         assert any("after date_end" in e for e in errors)
         assert any("period" in e.lower() or "daily" in e for e in errors)
         assert filters.validate(filters.default_filters()) == []

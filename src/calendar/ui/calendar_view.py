@@ -334,9 +334,14 @@ def _render_detail(metrics: dict, spans: dict, grain: str, period: str) -> None:
         "unavailable" if statuses == {"unavailable"} else "partial")
     _coverage_badge(status)
     if status == "unavailable":
-        st.info("No observations, clusters, or FRP records exist for this "
-                "period. This is missing data, not an observation of zero "
-                "fire activity.")
+        st.info("No observations, clusters, or FRP records exist in the precomputed "
+                "calendar tables for this period. This is missing local archive data, "
+                "not an observation of zero fire activity.")
+        st.caption(
+            "Precomputed Fire Calendar cells cover the local 2023 USA archive (2023-01-01 to 2023-12-31). "
+            "For other years (2000–present) or VIIRS NOAA-20 / NOAA-21, use **Activity Map**, "
+            "**Historical Analytics**, or **Events & Alerts → Pipeline** to retrieve and analyze NASA FIRMS data."
+        )
         return
 
     det = query.detection_row(metrics, grain, period) or {}
@@ -438,9 +443,15 @@ def _render_daily(metrics: dict, spans: dict, choice: str) -> None:
                 on_click=_shift_month, args=(1,))
     year = st.session_state[KEY_VIEW_YEAR]
     month = st.session_state[KEY_VIEW_MONTH]
+    max_picker_date = date(date.today().year + 1, 12, 31)
     with nav2:
-        picked = st.date_input("Jump to month", value=date(year, month, 1),
-                               key=KEY_JUMP_MONTH)
+        picked = st.date_input(
+            "Jump to month",
+            value=min(max(date(year, month, 1), filters.MIN_ARCHIVE_DATE), max_picker_date),
+            min_value=filters.MIN_ARCHIVE_DATE,
+            max_value=max_picker_date,
+            key=KEY_JUMP_MONTH,
+        )
     if isinstance(picked, date) and (picked.year, picked.month) != (year, month):
         year, month = picked.year, picked.month
         st.session_state[KEY_VIEW_YEAR] = year

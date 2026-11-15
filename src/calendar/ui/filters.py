@@ -11,10 +11,13 @@ import calendar as _calendar
 from dataclasses import dataclass
 from datetime import date, datetime
 
+from ..acquisition import sensors as _sensors
+
 GRAINS = ("daily", "weekly", "monthly")
-PRODUCTS = ("modis", "viirs-snpp")
-SATELLITES = ("Terra", "Aqua", "N")
+PRODUCTS = _sensors.ALL_PRODUCTS
+SATELLITES = _sensors.ALL_SATELLITES
 MODES = ("detections", "clusters")
+MIN_ARCHIVE_DATE = date(2000, 1, 1)
 
 # Session-state keys shared by the app and the views (single source).
 KEY_GRAIN = "cal_grain"
@@ -34,6 +37,12 @@ KEY_AOI_S = "cal_aoi_s"
 KEY_AOI_E = "cal_aoi_e"
 KEY_AOI_N = "cal_aoi_n"
 KEY_AOI_SAVED = "cal_aoi_saved"
+KEY_AOI_LAT = "cal_geo_lat"
+KEY_AOI_LON = "cal_geo_lon"
+KEY_AOI_RADIUS = "cal_geo_radius"
+KEY_RESOLVED_AOI = "cal_resolved_aoi"
+KEY_AOI_CUSTOM_SET = "cal_aoi_custom_set"
+KEY_AOI_POINT_SET = "cal_aoi_point_set"
 
 # App-open initial selected date (single source of truth). The calendar
 # period, the shared date range, and therefore the default map day all
@@ -41,7 +50,7 @@ KEY_AOI_SAVED = "cal_aoi_saved"
 # on the full historical archive.
 INITIAL_DAY = "2023-08-01"
 
-AOI_MODES = ("full", "region", "custom", "viewport", "saved")
+AOI_MODES = ("full", "region", "point_radius", "custom", "viewport", "saved")
 
 
 @dataclass(frozen=True)
@@ -58,7 +67,7 @@ class FilterState:
 
 
 def default_filters() -> FilterState:
-    """Default context: full pilot year, both sensors, detection mode."""
+    """Default filter context: daily snapshot, all active sensors, detection mode."""
     return FilterState()
 
 

@@ -873,35 +873,121 @@ def _render_pipeline(conn) -> None:
     filters_mod.sync_inputs_from_range(
         st.session_state, start_key="cal_pipe_start",
         end_key="cal_pipe_end", sentinel_key="cal_pipe_synced_range")
+
+    session_aoi = None
+    session_aoi_error = ""
     try:
-        pipe_bbox = aoi_mod.resolve_bbox(
-            mode=st.session_state.get(filters_mod.KEY_AOI_MODE, "full"),
-            region_id=st.session_state.get(filters_mod.KEY_AOI_REGION),
-            custom=(st.session_state.get(filters_mod.KEY_AOI_W),
-                    st.session_state.get(filters_mod.KEY_AOI_S),
-                    st.session_state.get(filters_mod.KEY_AOI_E),
-                    st.session_state.get(filters_mod.KEY_AOI_N)),
-            viewport=st.session_state.get("cal_map_bbox"),
-            saved=None)
-    except aoi_mod.AoIError:
-        pipe_bbox = None
-    aoi_mode = st.session_state.get(filters_mod.KEY_AOI_MODE, "full")
-    reg_id = st.session_state.get(filters_mod.KEY_AOI_REGION)
-    region_label = (
-        regions.region_label(reg_id)
-        if aoi_mode == "region" and reg_id
-        else ("Full 2023 USA Pilot" if not pipe_bbox else f"{aoi_mode} AOI")
+        session_aoi = aoi_mod.resolve_session_aoi(
+            st.session_state,
+            aoi_path=settings.CAL_AOI_PATH,
+            include_session_fallback=True,
+        )
+    except aoi_mod.AoIError as exc:
+        session_aoi_error = str(exc)
+
+    live_ds = st.session_state.get("cal_live_regional")
+    pipe_aoi_source = st.session_state.get("cal_pipe_aoi_source", "auto")
+    need_aoi_prompt = (
+        session_aoi is None
+        and pipe_aoi_source == "auto"
+        and bool(st.session_state.get("cal_pipe_live_firms"))
     )
-    if pipe_bbox:
-        st.caption(f"Geographic filter active (**{region_label}**): lon {pipe_bbox[0]:.2f}…"
-                   f"{pipe_bbox[2]:.2f}, lat {pipe_bbox[1]:.2f}…"
-                   f"{pipe_bbox[3]:.2f} (sidebar Geographic area of interest).")
+    with st.expander("Geographic Area of Interest (AOI) for Pipeline", expanded=need_aoi_prompt):
+        aoi_source = st.radio(
+            "Pipeline AOI selection",
+            options=["auto", "region", "point_radius", "custom"],
+            key="cal_pipe_aoi_source",
+            horizontal=True,
+            format_func=lambda s: {
+                "auto": "Sidebar / active session AOI",
+                "region": "Named region",
+                "point_radius": "Point + radius (lat/lon + km)",
+                "custom": "Custom bounding box",
+            }[s],
+        )
+        pipe_aoi = None
+        aoi_error = ""
+        if aoi_source == "auto":
+            pipe_aoi = session_aoi
+            aoi_error = session_aoi_error
+        elif aoi_source == "region":
+            reg_opts = sorted(regions.REGIONS)
+            if "cal_pipe_reg" not in st.session_state:
+                st.session_state["cal_pipe_reg"] = (
+                    session_aoi.region_id
+                    if session_aoi and session_aoi.region_id in regions.REGIONS
+                    else "california"
+                )
+            picked_reg = st.selectbox(
+                "Country / region",
+                options=reg_opts,
+                key="cal_pipe_reg",
+                format_func=regions.region_label,
+            )
+            try:
+                pipe_aoi = aoi_mod.resolve_aoi(mode="region", region_id=picked_reg)
+            except aoi_mod.AoIError as exc:
+                aoi_error = str(exc)
+        elif aoi_source == "point_radius":
+            st.session_state.setdefault("cal_pipe_lat", float(st.session_state.get(filters_mod.KEY_AOI_LAT, 40.4168)))
+            st.session_state.setdefault("cal_pipe_lon", float(st.session_state.get(filters_mod.KEY_AOI_LON, -3.7038)))
+            st.session_state.setdefault("cal_pipe_rad", float(st.session_state.get(filters_mod.KEY_AOI_RADIUS, 100.0)))
+            c_lat, c_lon, c_rad = st.columns(3)
+            with c_lat:
+                p_lat = st.number_input("Latitude", key="cal_pipe_lat", format="%.4f")
+            with c_lon:
+                p_lon = st.number_input("Longitude", key="cal_pipe_lon", format="%.4f")
+            with c_rad:
+                p_rad = st.number_input("Radius (km)", key="cal_pipe_rad", min_value=0.5, max_value=2000.0, step=5.0, format="%.1f")
+            try:
+                pipe_aoi = aoi_mod.resolve_aoi(
+                    mode="point_radius",
+                    latitude=p_lat,
+                    longitude=p_lon,
+                    radius_km=p_rad,
+                )
+            except aoi_mod.AoIError as exc:
+                aoi_error = str(exc)
+        else:
+            st.session_state.setdefault("cal_pipe_w", float(st.session_state.get(filters_mod.KEY_AOI_W, -124.48)))
+            st.session_state.setdefault("cal_pipe_s", float(st.session_state.get(filters_mod.KEY_AOI_S, 32.53)))
+            st.session_state.setdefault("cal_pipe_e", float(st.session_state.get(filters_mod.KEY_AOI_E, -114.13)))
+            st.session_state.setdefault("cal_pipe_n", float(st.session_state.get(filters_mod.KEY_AOI_N, 42.01)))
+            cw, ce = st.columns(2)
+            with cw:
+                pw = st.number_input("West", key="cal_pipe_w", format="%.2f")
+                ps = st.number_input("South", key="cal_pipe_s", format="%.2f")
+            with ce:
+                pe = st.number_input("East", key="cal_pipe_e", format="%.2f")
+                pn = st.number_input("North", key="cal_pipe_n", format="%.2f")
+            try:
+                pipe_aoi = aoi_mod.resolve_aoi(mode="custom", bbox=(pw, ps, pe, pn))
+            except aoi_mod.AoIError as exc:
+                aoi_error = str(exc)
+
+        if pipe_aoi is not None and not aoi_error:
+            st.session_state[filters_mod.KEY_RESOLVED_AOI] = pipe_aoi.to_dict()
+
+    pipe_bbox = pipe_aoi.bbox if pipe_aoi is not None else None
+    region_label = (
+        pipe_aoi.label
+        if pipe_aoi is not None
+        else "USA / CONUS Archive Extent"
+    )
+    if aoi_error:
+        st.error(f"Area of interest error: {aoi_error}")
+    elif pipe_aoi is not None:
+        st.success(
+            f"Active AOI ({pipe_aoi.source}): **{pipe_aoi.label}** · "
+            f"Generated bbox `{pipe_aoi.format_bbox()}`"
+        )
     else:
-        st.caption("Geographic filter: full pilot (USA). Set a sidebar "
-                   "Geographic area of interest (e.g. Brazil, Spain, Australia, "
-                   "California, or custom lat/lon/bbox) to restrict or fetch regionally.")
-    st.caption("Date inputs follow the shared sidebar range until you "
-               "edit them here.")
+        st.caption(
+            "Geographic filter: no specific AOI selected (local 2023 archive runs cover USA / CONUS; "
+            "live NASA FIRMS acquisition requires choosing a region, point + radius, or bounding box above or in the sidebar)."
+        )
+
+    st.caption("Date inputs follow the shared sidebar range until edited here. Dates beyond 2023 are retrieved via NASA FIRMS.")
     col_a, col_b = st.columns(2)
     with col_a:
         start = st.text_input("Start Date", value="2023-08-15",
@@ -910,25 +996,48 @@ def _render_pipeline(conn) -> None:
     with col_b:
         end = st.text_input("End Date", value="2023-08-16",
                             key="cal_pipe_end", placeholder="YYYY-MM-DD")
-    live_ds = st.session_state.get("cal_live_regional")
     firms_ready = bool(settings.get_setting("FIRMS_MAP_KEY", ""))
-    default_live = bool(
-        pipe_bbox is not None
-        and live_ds is not None
-        and live_ds.bbox == pipe_bbox
-        and live_ds.date_start == (start or "").strip()
-        and live_ds.date_end == (end or "").strip()
+    clean_start_val = (start or "").strip()
+    clean_end_val = (end or "").strip()
+    outside_local = bool(
+        clean_start_val
+        and clean_end_val
+        and (clean_start_val < "2023-01-01" or clean_end_val > "2023-12-31")
     )
+    aoi_sig = (pipe_aoi.source, pipe_aoi.bbox) if pipe_aoi is not None else None
+    default_live = bool(
+        (
+            live_ds is not None
+            and (pipe_bbox is None or live_ds.bbox == pipe_bbox)
+            and live_ds.date_start == clean_start_val
+            and live_ds.date_end == clean_end_val
+        )
+        or (firms_ready and (outside_local or pipe_aoi is not None))
+    )
+    prev_outside = st.session_state.get("cal_pipe_prev_outside")
+    prev_aoi_sig = st.session_state.get("cal_pipe_prev_aoi_sig")
+    if "cal_pipe_live_firms" not in st.session_state:
+        st.session_state["cal_pipe_live_firms"] = default_live
+    elif firms_ready and ((outside_local and not prev_outside) or (aoi_sig is not None and aoi_sig != prev_aoi_sig)):
+        st.session_state["cal_pipe_live_firms"] = True
+    st.session_state["cal_pipe_prev_outside"] = outside_local
+    st.session_state["cal_pipe_prev_aoi_sig"] = aoi_sig
     use_live_firms = st.checkbox(
-        f"Acquire live NASA FIRMS observations for {region_label} (required outside USA 2023 archive)",
-        value=default_live,
+        f"Acquire live NASA FIRMS observations for {region_label} (all 5 satellites · multi-year)",
         key="cal_pipe_live_firms",
         disabled=not firms_ready and live_ds is None,
-        help="Retrieves MODIS/VIIRS FIRMS Area API observations for the active bounding box "
-             "when FIRMS_MAP_KEY is configured."
+        help="Retrieves MODIS & VIIRS (S-NPP, NOAA-20, NOAA-21) FIRMS Area API observations "
+             "for the active bounding box and date window when FIRMS_MAP_KEY is configured.",
     )
     if not firms_ready:
         st.caption("NASA FIRMS API key (`FIRMS_MAP_KEY`) is not configured in this environment.")
+
+    missing_aoi_for_live = bool(use_live_firms) and pipe_aoi is None and live_ds is None
+    if missing_aoi_for_live and not aoi_error:
+        st.warning(
+            "Live NASA FIRMS acquisition requires an Area of Interest: select a named region, "
+            "point + radius, or bounding box above or in the sidebar."
+        )
 
     l2_match = st.checkbox(
         "Match Level-2 granules (needs network + Earthdata; "
@@ -971,7 +1080,8 @@ def _render_pipeline(conn) -> None:
             + (f"IBM Granite ready ({granite.model})." if granite_ok else f"IBM Granite unavailable ({granite_reason}).")
         )
 
-    if st.button("Run Analysis", key="cal_pipe_go"):
+    run_blocked = bool(aoi_error) or missing_aoi_for_live
+    if st.button("Run Analysis", key="cal_pipe_go", disabled=run_blocked):
         providers_list = []
         if pipe_ai_mode in ("auto", "qwen") and eff_model:
             providers_list.append(QwenProvider(
@@ -985,7 +1095,10 @@ def _render_pipeline(conn) -> None:
             box.write(f"{name}: {state}"
                       + (f" — {detail}" if detail else ""))
 
-        extra_kw: dict = {}
+        extra_kw: dict = {
+            "resolved_aoi": pipe_aoi,
+            "region_id": pipe_aoi.region_id if pipe_aoi else None,
+        }
         clean_start = (start or "").strip()
         clean_end = (end or "").strip()
         if use_live_firms:

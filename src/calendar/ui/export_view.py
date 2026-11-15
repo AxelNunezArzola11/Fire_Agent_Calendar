@@ -227,8 +227,10 @@ def _selection() -> dict:
 
 def _scoped_products(category: str, selection: dict) -> tuple:
     """Category products intersected with the shared product filter."""
-    wanted = {"modis": ("modis",), "viirs": ("viirs-snpp",)}.get(
-        category, selection["products"])
+    wanted = {
+        "modis": ("modis",),
+        "viirs": ("viirs-snpp", "viirs-noaa20", "viirs-noaa21"),
+    }.get(category, selection["products"])
     if category in ("combined", "harmonized"):
         return selection["products"]
     return tuple(p for p in selection["products"] if p in wanted)
@@ -240,7 +242,7 @@ def _scoped_satellites(category: str, selection: dict) -> tuple:
     if category == "modis":
         return tuple(s for s in satellites if s in ("Terra", "Aqua"))
     if category == "viirs":
-        return tuple(s for s in satellites if s == "N")
+        return tuple(s for s in satellites if s in ("N", "NPP", "NOAA-20", "N20", "NOAA-21", "N21"))
     return satellites
 
 
@@ -403,16 +405,12 @@ def render_export_tab() -> None:
         format_func=lambda c: CATEGORIES[c])
     try:
         selection = _selection()
-        bbox = aoi_mod.resolve_bbox(
-            mode=st.session_state.get(filters.KEY_AOI_MODE, "full"),
-            region_id=st.session_state.get(filters.KEY_AOI_REGION),
-            custom=(st.session_state.get(filters.KEY_AOI_W),
-                    st.session_state.get(filters.KEY_AOI_S),
-                    st.session_state.get(filters.KEY_AOI_E),
-                    st.session_state.get(filters.KEY_AOI_N)),
-            viewport=st.session_state.get(map_view.KEY_MAP_BBOX),
-            saved=(aoi_mod.load_aois(settings.CAL_AOI_PATH).get(
-                st.session_state.get(filters.KEY_AOI_SAVED, "")) or None))
+        resolved_ex = aoi_mod.resolve_session_aoi(
+            st.session_state,
+            aoi_path=settings.CAL_AOI_PATH,
+            include_session_fallback=True,
+        )
+        bbox = resolved_ex.bbox if resolved_ex is not None else None
     except ValueError as exc:
         st.error(f"Invalid filter: {exc}")
         return

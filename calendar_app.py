@@ -21,6 +21,7 @@ sys.path.insert(0, str(REPO))
 import streamlit as st
 
 from src.calendar import settings
+from src.calendar.acquisition import sensors
 from src.calendar.processing import regions
 from src.calendar.ui import (analytics_view, aoi, calendar_view, events_view,
                              export_view, filters, frames, map_view, query)
@@ -232,9 +233,30 @@ def _apply_region_bbox(region_id: str) -> None:
      st.session_state[filters.KEY_AOI_S],
      st.session_state[filters.KEY_AOI_E],
      st.session_state[filters.KEY_AOI_N]) = reg.bbox
+    st.session_state[filters.KEY_AOI_CUSTOM_SET] = True
 
 
-def _aoi_controls() -> None:
+def _apply_point_to_custom() -> None:
+    """on_click: compute radius bbox from point + radius into custom bbox inputs."""
+    try:
+        box = aoi.radius_bbox(
+            st.session_state.get(filters.KEY_AOI_LAT, 40.59),
+            st.session_state.get(filters.KEY_AOI_LON, -122.39),
+            st.session_state.get(filters.KEY_AOI_RADIUS, 50.0),
+        )
+    except aoi.AoIError as exc:
+        st.session_state["cal_geo_apply_err"] = str(exc)
+        return
+    st.session_state.pop("cal_geo_apply_err", None)
+    (st.session_state[filters.KEY_AOI_W],
+     st.session_state[filters.KEY_AOI_S],
+     st.session_state[filters.KEY_AOI_E],
+     st.session_state[filters.KEY_AOI_N]) = box
+    st.session_state[filters.KEY_AOI_CUSTOM_SET] = True
+    st.session_state["cal_geo_apply_ok"] = box
+
+
+def _aoi_controls(saved_aois: dict[str, dict] | None = None) -> None:
     """Controls for the active AOI mode (inside the sidebar expander)."""
     mode = st.session_state.get(filters.KEY_AOI_MODE, "full")
     if mode == "region":
@@ -253,7 +275,43 @@ def _aoi_controls() -> None:
                 f"lat `{s:.2f}..{n:.2f}`"
             )
             st.caption(region.source)
+    elif mode == "point_radius":
+        st.session_state.setdefault(filters.KEY_AOI_LAT, 40.59)
+        st.session_state.setdefault(filters.KEY_AOI_LON, -122.39)
+        st.session_state.setdefault(filters.KEY_AOI_RADIUS, 50.0)
+        place = st.text_input("Find place (optional)", key="cal_geo_place",
+                              placeholder="e.g. Seville, Spain or Manaus, Brazil")
+        if st.button("Find place", key="cal_geo_find") and place:
+            try:
+                found = aoi.geocode_nominatim(place.strip())
+            except aoi.AoIError as exc:
+                st.error(str(exc))
+            else:
+                st.session_state[filters.KEY_AOI_LAT] = found["latitude"]
+                st.session_state[filters.KEY_AOI_LON] = found["longitude"]
+                st.caption(f"Found: {found['label']}")
+        col_lat, col_lon = st.columns(2)
+        with col_lat:
+            st.number_input("Latitude", key=filters.KEY_AOI_LAT, format="%.4f")
+        with col_lon:
+            st.number_input("Longitude", key=filters.KEY_AOI_LON, format="%.4f")
+        st.number_input("Radius (km)", key=filters.KEY_AOI_RADIUS,
+                        min_value=0.5, max_value=2000.0, step=5.0, format="%.1f")
+        st.session_state[filters.KEY_AOI_POINT_SET] = True
+        try:
+            box = aoi.radius_bbox(
+                st.session_state.get(filters.KEY_AOI_LAT),
+                st.session_state.get(filters.KEY_AOI_LON),
+                st.session_state.get(filters.KEY_AOI_RADIUS),
+            )
+            st.caption(
+                f"Auto bbox (EPSG:4326): lon `{box[0]:.2f}..{box[2]:.2f}`, "
+                f"lat `{box[1]:.2f}..{box[3]:.2f}`."
+            )
+        except aoi.AoIError as exc:
+            st.error(f"Invalid point/radius: {exc}")
     elif mode == "custom":
+        st.session_state[filters.KEY_AOI_CUSTOM_SET] = True
         st.caption("Quick regional bbox presets:")
         preset_cols = st.columns(4)
         for col, rid, short in zip(
@@ -269,51 +327,44 @@ def _aoi_controls() -> None:
                 help=f"Set custom bbox to {regions.region_label(rid)}",
             )
         with st.expander("Search by place or coordinates"):
+            st.session_state.setdefault(filters.KEY_AOI_LAT, 40.59)
+            st.session_state.setdefault(filters.KEY_AOI_LON, -122.39)
+            st.session_state.setdefault(filters.KEY_AOI_RADIUS, 50.0)
             place = st.text_input("Place name", key="cal_geo_place",
                                   placeholder="e.g. Seville, Spain or Manaus, Brazil")
-            col_lat, col_lon = st.columns(2)
-            with col_lat:
-                plat = st.number_input("Latitude", value=40.59,
-                                       key="cal_geo_lat", format="%.4f")
-            with col_lon:
-                plon = st.number_input("Longitude", value=-122.39,
-                                       key="cal_geo_lon", format="%.4f")
-            prad = st.number_input("Radius (km)", value=50.0,
-                                   key="cal_geo_radius")
             if st.button("Find place", key="cal_geo_find") and place:
                 try:
                     found = aoi.geocode_nominatim(place.strip())
                 except aoi.AoIError as exc:
                     st.error(str(exc))
                 else:
-                    st.session_state["cal_geo_lat"] = found["latitude"]
-                    st.session_state["cal_geo_lon"] = found["longitude"]
+                    st.session_state[filters.KEY_AOI_LAT] = found["latitude"]
+                    st.session_state[filters.KEY_AOI_LON] = found["longitude"]
                     st.caption(f"Found: {found['label']}")
-            if st.button("Apply point + radius", key="cal_geo_apply"):
-                try:
-                    box = aoi.radius_bbox(
-                        st.session_state.get("cal_geo_lat"),
-                        st.session_state.get("cal_geo_lon"),
-                        st.session_state.get("cal_geo_radius"))
-                except aoi.AoIError as exc:
-                    st.error(str(exc))
-                else:
-                    (st.session_state[filters.KEY_AOI_W],
-                     st.session_state[filters.KEY_AOI_S],
-                     st.session_state[filters.KEY_AOI_E],
-                     st.session_state[filters.KEY_AOI_N]) = box
-                    st.success("Custom area set from search.")
+            col_lat, col_lon = st.columns(2)
+            with col_lat:
+                st.number_input("Latitude", key=filters.KEY_AOI_LAT, format="%.4f")
+            with col_lon:
+                st.number_input("Longitude", key=filters.KEY_AOI_LON, format="%.4f")
+            st.number_input("Radius (km)", key=filters.KEY_AOI_RADIUS,
+                            min_value=0.5, max_value=2000.0, step=5.0, format="%.1f")
+            st.button("Apply point + radius", key="cal_geo_apply",
+                      on_click=_apply_point_to_custom)
+            if st.session_state.get("cal_geo_apply_err"):
+                st.error(st.session_state["cal_geo_apply_err"])
+            elif st.session_state.get("cal_geo_apply_ok"):
+                st.success("Custom bbox updated from point + radius.")
+        st.session_state.setdefault(filters.KEY_AOI_W, -124.48)
+        st.session_state.setdefault(filters.KEY_AOI_S, 32.53)
+        st.session_state.setdefault(filters.KEY_AOI_E, -114.13)
+        st.session_state.setdefault(filters.KEY_AOI_N, 42.01)
         col_w, col_e = st.columns(2)
         with col_w:
-            st.number_input("West", value=-124.48, key=filters.KEY_AOI_W,
-                            format="%.2f")
-            st.number_input("South", value=32.53, key=filters.KEY_AOI_S,
-                            format="%.2f")
+            st.number_input("West", key=filters.KEY_AOI_W, format="%.2f")
+            st.number_input("South", key=filters.KEY_AOI_S, format="%.2f")
         with col_e:
-            st.number_input("East", value=-114.13, key=filters.KEY_AOI_E,
-                            format="%.2f")
-            st.number_input("North", value=42.01, key=filters.KEY_AOI_N,
-                            format="%.2f")
+            st.number_input("East", key=filters.KEY_AOI_E, format="%.2f")
+            st.number_input("North", key=filters.KEY_AOI_N, format="%.2f")
         try:
             aoi.validate_bbox((st.session_state[filters.KEY_AOI_W],
                                st.session_state[filters.KEY_AOI_S],
@@ -330,11 +381,14 @@ def _aoi_controls() -> None:
             st.caption("Pan/zoom the map, then click “Filter to current map "
                        "view” in the Activity Map tab.")
     elif mode == "saved":
-        try:
-            saved = aoi.load_aois(settings.CAL_AOI_PATH)
-        except aoi.AoIError as exc:
-            st.error(str(exc))
-            return
+        if saved_aois is None:
+            try:
+                saved = aoi.load_aois(settings.CAL_AOI_PATH)
+            except aoi.AoIError as exc:
+                st.error(str(exc))
+                return
+        else:
+            saved = saved_aois
         if not saved:
             st.caption("No saved areas yet (save one below).")
         else:
@@ -365,7 +419,7 @@ def _aoi_controls() -> None:
 def _sidebar() -> None:
     with st.sidebar:
         st.title("FireAgent Calendar")
-        st.caption("Historical satellite fire observations (2023 pilot).")
+        st.caption("Multi-year & global satellite fire observations (local archive + live NASA FIRMS).")
         st.caption(calendar_view.TEMPORAL_BASIS_LABEL)
         st.subheader("Shared filters")
         st.radio("Map mode", options=list(filters.MODES), key=filters.KEY_MODE,
@@ -383,7 +437,15 @@ def _sidebar() -> None:
                        default=list(query.PRODUCTS), key=filters.KEY_PRODUCTS)
         st.multiselect("Satellites", options=list(query.SATELLITES),
                        default=list(query.SATELLITES), key=filters.KEY_SATELLITES)
-        st.caption("VIIRS NOAA-20/21 have no 2023 pilot data.")
+        _avail_sidebar = sensors.evaluate_availability(
+            str(st.session_state.get(filters.KEY_RANGE_START, filters.INITIAL_DAY)),
+            str(st.session_state.get(filters.KEY_RANGE_END, filters.INITIAL_DAY)),
+            tuple(st.session_state.get(filters.KEY_PRODUCTS, list(query.PRODUCTS))),
+            tuple(st.session_state.get(filters.KEY_SATELLITES, list(query.SATELLITES))),
+            firms_key_configured=bool(settings.get_setting("FIRMS_MAP_KEY", "")),
+            live_dataset=st.session_state.get("cal_live_regional"),
+        )
+        st.caption(_avail_sidebar["summary"])
         with st.expander("Confidence"):
             st.slider("MODIS minimum (0–100)", 0, 100, 0,
                       key=filters.KEY_MODIS_CONF,
@@ -395,23 +457,53 @@ def _sidebar() -> None:
                                 "(low/nominal/high).")
             st.caption("Confidence scales differ by product and are filtered "
                        "independently.")
+        try:
+            saved_aois = aoi.load_aois(settings.CAL_AOI_PATH)
+        except aoi.AoIError:
+            saved_aois = {}
         with st.expander("Geographic area of interest"):
-            st.radio("Area", options=list(filters.AOI_MODES),
-                     key=filters.KEY_AOI_MODE,
-                     format_func=lambda m: {
-                         "full": "Full pilot (USA 2023)",
-                         "region": "Preset country / region",
-                         "custom": "Custom bounding box / lat-lon",
-                         "viewport": "Current map view",
-                         "saved": "Saved area"}[m])
-            _aoi_controls()
+            prev_aoi_mode = st.session_state.get("cal_prev_aoi_mode")
+            sel_aoi_mode = st.radio("Area", options=list(filters.AOI_MODES),
+                                    key=filters.KEY_AOI_MODE,
+                                    format_func=lambda m: {
+                                        "full": "Full archive extent (USA / North America)",
+                                        "region": "Preset country / region",
+                                        "point_radius": "Point + radius (lat/lon + km)",
+                                        "custom": "Custom bounding box / lat-lon",
+                                        "viewport": "Current map view",
+                                        "saved": "Saved area"}[m])
+            if prev_aoi_mode is not None and prev_aoi_mode != "full" and sel_aoi_mode == "full":
+                st.session_state.pop(filters.KEY_RESOLVED_AOI, None)
+                st.session_state.pop(filters.KEY_AOI_CUSTOM_SET, None)
+                st.session_state.pop(filters.KEY_AOI_POINT_SET, None)
+            st.session_state["cal_prev_aoi_mode"] = sel_aoi_mode
+            _aoi_controls(saved_aois)
+            try:
+                resolved_sb = aoi.resolve_session_aoi(
+                    st.session_state,
+                    saved_aois=saved_aois,
+                    include_session_fallback=True,
+                )
+            except aoi.AoIError as exc:
+                st.caption(f"AOI pending: {exc}")
+            else:
+                if resolved_sb is not None:
+                    st.caption(
+                        f"Resolved AOI ({resolved_sb.source}): **{resolved_sb.label}** · "
+                        f"`{resolved_sb.format_bbox()}`"
+                    )
         spans = _spans()
-        with st.expander("Verified coverage"):
+        with st.expander("Data coverage (local archive & NASA FIRMS)"):
             if spans:
                 for dataset, span in sorted(spans.items()):
-                    st.write(f"{dataset}: {span['min']} to {span['max']}")
+                    st.write(f"Local archive ({dataset}): {span['min']} to {span['max']}")
             else:
-                st.caption("Catalog coverage metadata unavailable.")
+                st.caption("Local catalog coverage metadata unavailable.")
+            st.caption(
+                "NASA FIRMS live sources: MODIS (2000-11-01–present), "
+                "VIIRS S-NPP (2012-01-20–present), VIIRS NOAA-20 (2018-04-01–present), "
+                "VIIRS NOAA-21 (2023-03-01–present)."
+            )
         with st.expander("Analytical provenance"):
             for stage, exec_id in sorted(query.exec_chain().items()):
                 st.write(f"Phase {stage}: `{exec_id[:8]}`"
@@ -449,10 +541,12 @@ def _sidebar() -> None:
 def _about_tab(metrics: dict | None) -> None:
     metrics = metrics or {}
     st.header("About this data")
-    st.write("FireAgent Calendar explores the verified 2023 NASA FIRMS pilot "
-             "(482,672 accepted MODIS and VIIRS Standard detections) through "
-             "pinned Phase 2 analytical outputs. Figures are read from those "
-             "outputs; the interface computes no new analytics.")
+    st.write("FireAgent Calendar combines a local 2023 USA baseline archive "
+             "(482,672 accepted MODIS and VIIRS S-NPP detections with pinned "
+             "Phase 2–4 analytics) with multi-year, global NASA FIRMS "
+             "retrieval across MODIS (Terra, Aqua) and VIIRS (Suomi-NPP, "
+             "NOAA-20, NOAA-21). Archived outputs read directly from verified "
+             "artifacts; newly fetched windows execute dynamically with explicit provenance.")
     st.subheader("Temporal basis")
     computed = metrics.get("yearly", {}).get("detection_activity", {})
     st.write("- Acquisition date (UTC): when the satellite collected the "
@@ -532,12 +626,20 @@ def _about_tab(metrics: dict | None) -> None:
     for citation in calendar_view.CITATIONS:
         st.write(f"- {citation}")
     st.subheader("Limitations")
-    st.write("- Pilot year 2023 only; both sensors cover 2023-01-01 to "
-             "2023-12-31. NOAA-20/21 have no pilot data.")
+    _avail_about = sensors.evaluate_availability(
+        str(st.session_state.get(filters.KEY_RANGE_START, filters.INITIAL_DAY)),
+        str(st.session_state.get(filters.KEY_RANGE_END, filters.INITIAL_DAY)),
+        tuple(st.session_state.get(filters.KEY_PRODUCTS, list(query.PRODUCTS))),
+        tuple(st.session_state.get(filters.KEY_SATELLITES, list(query.SATELLITES))),
+        firms_key_configured=bool(settings.get_setting("FIRMS_MAP_KEY", "")),
+        live_dataset=st.session_state.get("cal_live_regional"),
+    )
+    for lim in _avail_about["limitations"]:
+        st.write(f"- {lim}")
     st.write("- Single-linkage chaining can merge nearby activity into very "
              "large clusters; cluster size is not fire size.")
-    st.write("- The California region (map filter) is an approximate bounding "
-             "box, not an administrative boundary.")
+    st.write("- Preset region extents are approximate bounding boxes, not "
+             "official administrative boundaries.")
 
 
 def main() -> None:

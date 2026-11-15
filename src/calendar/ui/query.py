@@ -21,13 +21,15 @@ import duckdb
 import pandas as pd
 
 from .. import settings
+from ..acquisition import sensors as _sensors
 
-PRODUCTS = ("modis", "viirs-snpp")
-SATELLITES = ("Terra", "Aqua", "N")
-SATELLITE_LABELS = {"Terra": "MODIS Terra", "Aqua": "MODIS Aqua",
-                    "N": "VIIRS Suomi-NPP"}
-# Satellites the spec names that have no 2023 pilot data (never invented).
-SATELLITES_UNAVAILABLE = ("NOAA-20", "NOAA-21")
+PRODUCTS = _sensors.ALL_PRODUCTS
+SATELLITES = _sensors.ALL_SATELLITES
+SATELLITE_LABELS = dict(_sensors.SATELLITE_LABELS)
+# Satellites not pre-indexed inside the local 2023 USA DuckDB pilot archive;
+# supported dynamically for multi-year/regional queries via NASA FIRMS Area API.
+SATELLITES_NOT_IN_LOCAL_ARCHIVE = ("NOAA-20", "NOAA-21")
+SATELLITES_UNAVAILABLE: tuple[str, ...] = ()
 
 METRICS_FILENAME = "metrics_2d.json"
 INDEX_FILENAME = "index_2e.json"
@@ -735,8 +737,9 @@ def _detection_where(products: tuple[str, ...], satellites: tuple[str, ...],
         if len(satellites) == 0:
             clauses.append("FALSE")
         else:
-            clauses.append(f"satellite IN ({', '.join(['?'] * len(satellites))})")
-            params.extend(satellites)
+            expanded_sats = _sensors.expand_satellite_aliases(satellites)
+            clauses.append(f"satellite IN ({', '.join(['?'] * len(expanded_sats))})")
+            params.extend(expanded_sats)
     if bbox:
         w, s, e, n = bbox
         clauses.append("longitude BETWEEN ? AND ? AND latitude BETWEEN ? AND ?")
@@ -749,11 +752,11 @@ def _detection_where(products: tuple[str, ...], satellites: tuple[str, ...],
         picked = [c for c in viirs_conf if c in VIIRS_CONFIDENCE]
         if picked:
             clauses.append(
-                "(product <> 'viirs-snpp' OR "
+                "(product NOT IN ('viirs-snpp', 'viirs-noaa20', 'viirs-noaa21') OR "
                 f"confidence IN ({', '.join(['?'] * len(picked))}))")
             params.extend(picked)
         else:  # empty selection removes VIIRS rows, keeps other products
-            clauses.append("product <> 'viirs-snpp'")
+            clauses.append("product NOT IN ('viirs-snpp', 'viirs-noaa20', 'viirs-noaa21')")
     return " AND ".join(clauses), params
 
 
@@ -1086,12 +1089,29 @@ def query_regional_timeseries(
 
     if extra_df is not None:
         df = extra_df.copy()
-        if bbox is not None and not df.empty:
-            w, s, e, n = (float(v) for v in bbox)
-            df = df[
-                (df["longitude"] >= w) & (df["longitude"] <= e)
-                & (df["latitude"] >= s) & (df["latitude"] <= n)
-            ].copy()
+        if not df.empty:
+            if bbox is not None:
+                w, s, e, n = (float(v) for v in bbox)
+                df = df[
+                    (df["longitude"] >= w) & (df["longitude"] <= e)
+                    & (df["latitude"] >= s) & (df["latitude"] <= n)
+                ]
+            if products is not None:
+                df = df[df["product"].isin(products)]
+            if satellites is not None:
+                expanded = set(_sensors.expand_satellite_aliases(satellites))
+                df = df[df["satellite"].astype(str).isin(expanded)]
+            if modis_conf_min is not None and not df.empty:
+                conf_num = pd.to_numeric(df["confidence"], errors="coerce")
+                df = df[(df["product"] != "modis") | (conf_num >= int(modis_conf_min))]
+            if viirs_conf is not None and not df.empty:
+                picked = [c for c in viirs_conf if c in VIIRS_CONFIDENCE]
+                is_viirs = df["product"].astype(str).str.startswith("viirs")
+                if picked:
+                    df = df[(~is_viirs) | df["confidence"].astype(str).isin(picked)]
+                else:
+                    df = df[~is_viirs]
+            df = df.copy()
         return regional.build_regional_timeseries(
             df,
             metric=metric,

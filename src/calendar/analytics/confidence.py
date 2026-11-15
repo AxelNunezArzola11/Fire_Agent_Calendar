@@ -55,7 +55,8 @@ def components(record: dict) -> dict:
     else:
         variance_state = "not-enough-data"
     scope = record.get("scope", "")
-    if scope in ("modis", "viirs-snpp", "Terra", "Aqua", "N", "viirs"):
+    if scope in ("modis", "viirs-snpp", "viirs-noaa20", "viirs-noaa21",
+                 "Terra", "Aqua", "N", "NOAA-20", "NOAA-21", "viirs"):
         sensor_note = "single-sensor scope; no cross-sensor borrowing"
     elif scope in ("raw", "count"):
         sensor_note = "all-sensor scope (pooled observations)"
@@ -63,6 +64,19 @@ def components(record: dict) -> dict:
         sensor_note = "harmonized scope per documented Phase 2E definition"
     else:
         sensor_note = "scope note unavailable"
+    ref_start = record.get("reference_start")
+    ref_end = record.get("reference_end")
+    algo_ver = str(record.get("algo_version") or "")
+    if ref_start and ref_end:
+        span_note = f"{ref_start} to {ref_end} (n={n} prior slots"
+        if str(ref_start)[:4] != str(ref_end)[:4]:
+            span_note += ", multi-year window)"
+        else:
+            span_note += ")"
+    elif "regional" in algo_ver:
+        span_note = f"dynamic trailing window (n={n} prior slots)"
+    else:
+        span_note = "single-cycle precomputed Stage 4C window (n<3 if uneligible)"
     return {
         "reference_n": n,
         "median_gate": "pass" if n >= MEDIAN_MIN_N else "fail",
@@ -73,7 +87,7 @@ def components(record: dict) -> dict:
         "sensor_note": sensor_note,
         "metric_caveat": METRIC_CAVEATS.get(record.get("metric", ""),
                                             "metric caveat unavailable"),
-        "history_depth": "single annual cycle (2023 pilot); no multi-year context",
+        "history_depth": span_note,
         "disclaimer": DISCLAIMER,
         "algo_version": ALGO_VERSION,
     }

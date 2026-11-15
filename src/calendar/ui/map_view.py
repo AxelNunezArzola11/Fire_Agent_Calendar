@@ -17,6 +17,7 @@ import pandas as pd
 from folium.plugins import MarkerCluster
 
 from .. import settings
+from ..acquisition import sensors
 from ..processing import regions
 from . import filters, query
 
@@ -443,9 +444,13 @@ def build_detection_map(df: pd.DataFrame, *, color_mode: str = "sensor",
             clusters[satellite].add_to(groups[satellite])
         return clusters[satellite]
 
-    for satellite in ("Terra", "Aqua", "N"):  # stable layers even when empty
+    for satellite in query.SATELLITES:  # stable layers across all 5 sensors even when empty
         _group_for(satellite)
     for row in df.itertuples(index=False):
+        sat = sensors.canonical_satellite(
+            str(getattr(row, "satellite", "")),
+            product=str(getattr(row, "product", "") or ""),
+        )
         color = (SENSOR_COLORS.get(row.instrument, "#7f7f7f")
                  if color_mode == "sensor"
                  else frp_color(getattr(row, "frp", None), q50, q75))
@@ -454,7 +459,7 @@ def build_detection_map(df: pd.DataFrame, *, color_mode: str = "sensor",
             fill=True, fill_opacity=0.7, weight=1,
             popup=detection_popup_html(row._asdict()),
             tooltip=str(row.detection_id),
-        ).add_to(_group_for(row.satellite))
+        ).add_to(_group_for(sat))
     for group in groups.values():
         group.add_to(param)
     if show_density and not df.empty:
@@ -806,28 +811,23 @@ def render_map_tab(spans: dict, cb: MapCallbacks) -> None:
     viirs_conf = tuple(st.session_state.get(filters.KEY_VIIRS_CONF,
                                             list(query.VIIRS_CONFIDENCE)))
     try:
-        bbox = aoi_mod.resolve_bbox(
-            mode=st.session_state.get(filters.KEY_AOI_MODE, "full"),
-            region_id=st.session_state.get(filters.KEY_AOI_REGION),
-            custom=(st.session_state.get(filters.KEY_AOI_W),
-                    st.session_state.get(filters.KEY_AOI_S),
-                    st.session_state.get(filters.KEY_AOI_E),
-                    st.session_state.get(filters.KEY_AOI_N)),
-            viewport=st.session_state.get(KEY_MAP_BBOX),
-            saved=(aoi_mod.load_aois(settings.CAL_AOI_PATH).get(
-                st.session_state.get(filters.KEY_AOI_SAVED, "")) or None))
+        resolved = aoi_mod.resolve_session_aoi(
+            st.session_state,
+            aoi_path=settings.CAL_AOI_PATH,
+            include_session_fallback=True,
+        )
     except aoi_mod.AoIError as exc:
         st.error(f"Area of interest: {exc}")
         return
+    bbox = resolved.bbox if resolved is not None else None
     limit = settings.CAL_MAP_RENDER_LIMIT
 
     aoi_mode = st.session_state.get(filters.KEY_AOI_MODE, "full")
-    reg_id = st.session_state.get(filters.KEY_AOI_REGION)
-    active_reg_id = reg_id if aoi_mode == "region" else None
+    active_reg_id = resolved.region_id if resolved is not None else None
     region_label = (
-        regions.region_label(reg_id)
-        if aoi_mode == "region" and reg_id
-        else ("Full 2023 USA Pilot" if not bbox else f"{aoi_mode} AOI")
+        resolved.label
+        if resolved is not None
+        else "USA / CONUS Archive Extent"
     )
 
     col_mode, col_opts = st.columns([1, 3])
@@ -855,10 +855,11 @@ def render_map_tab(spans: dict, cb: MapCallbacks) -> None:
                                   value=True, key=KEY_SHOW_EXTENT)
 
     live_ds = st.session_state.get("cal_live_regional")
+    fetch_bbox = bbox
     use_live_ds = (
         mode == "detections"
         and live_ds is not None
-        and (bbox is None or live_ds.bbox == bbox)
+        and (fetch_bbox is None or live_ds.bbox == fetch_bbox)
         and live_ds.date_start == date_start
         and live_ds.date_end == date_end
     )
@@ -866,18 +867,40 @@ def render_map_tab(spans: dict, cb: MapCallbacks) -> None:
     def _offer_live_firms_fetch(context_msg: str) -> None:
         from ..pipeline import regional
 
-        fetch_bbox = bbox or regions.CALIFORNIA.bbox
+        if fetch_bbox is None:
+            st.info(
+                "Select a Geographic area of interest in the sidebar (region, point + radius, "
+                "custom bbox, or saved area) to retrieve live NASA FIRMS observations."
+            )
+            return
         firms_ready = bool(settings.get_setting("FIRMS_MAP_KEY", ""))
+        avail = sensors.evaluate_availability(
+            date_start,
+            date_end,
+            products,
+            satellites,
+            firms_key_configured=firms_ready,
+            region_label=region_label,
+        )
+        for note in avail["sensor_notes"]:
+            st.caption(note)
         if not firms_ready:
             st.caption(
-                "Live global NASA FIRMS retrieval requires `FIRMS_MAP_KEY` in environment or Streamlit Secrets."
+                "Missing configuration: `FIRMS_MAP_KEY` in environment or Streamlit Secrets is required "
+                "to retrieve NASA FIRMS data beyond the local 2023 archive."
             )
+            return
+        if not avail["firms_sources"]:
+            st.caption("No NASA FIRMS satellite feed supports the current product/satellite/date combination.")
             return
         col_btn, col_note = st.columns([2, 3])
         with col_btn:
             if st.button(f"Retrieve live NASA FIRMS ({region_label})", key="cal_map_fetch_firms"):
                 try:
-                    with st.spinner(f"Fetching NASA FIRMS detections for {region_label} ({date_start}..{date_end})…"):
+                    with st.spinner(
+                        f"Fetching NASA FIRMS ({', '.join(avail['firms_sources'])}) "
+                        f"for {region_label} ({date_start}..{date_end})…"
+                    ):
                         ds = regional.fetch_firms_regional(
                             bbox=fetch_bbox,
                             date_start=date_start,
@@ -885,6 +908,7 @@ def render_map_tab(spans: dict, cb: MapCallbacks) -> None:
                             region_id=active_reg_id or aoi_mode,
                             region_label=region_label,
                             products=products,
+                            satellites=satellites,
                         )
                     st.session_state["cal_live_regional"] = ds
                     if ds.errors:
@@ -893,21 +917,40 @@ def render_map_tab(spans: dict, cb: MapCallbacks) -> None:
                 except ValueError as exc:
                     st.error(str(exc))
         with col_note:
-            st.caption(context_msg)
+            st.caption(f"{context_msg} (max {regional.max_live_firms_days()} days per live fetch)")
 
     if use_live_ds:
         st.success(
             f"Data origin: **Newly retrieved NASA FIRMS API** · Region: **{live_ds.region_label}** · "
-            f"Exec `{live_ds.exec_id[:8]}` · Sources: `{', '.join(live_ds.sources)}` · "
+            f"Exec `{live_ds.exec_id[:8]}` · Sources: `{', '.join(live_ds.sources) or 'none'}` · "
             f"{live_ds.n_detections:,} normalized detections."
         )
-        if st.button("Return to local 2023 archive", key="cal_map_clear_live"):
+        if st.button("Return to local 2023 archive view", key="cal_map_clear_live"):
             st.session_state.pop("cal_live_regional", None)
             st.rerun()
         df_live = live_ds.df
+        if not df_live.empty:
+            mask = pd.Series(True, index=df_live.index)
+            if "product" in df_live.columns:
+                mask &= df_live["product"].astype(str).isin(products or ())
+            if "satellite" in df_live.columns:
+                prods_col = df_live["product"] if "product" in df_live.columns else [""] * len(df_live)
+                norm_sats = [
+                    sensors.canonical_satellite(str(s), product=str(p))
+                    for s, p in zip(df_live["satellite"], prods_col)
+                ]
+                mask &= pd.Series(norm_sats, index=df_live.index).isin(satellites or ())
+            if modis_conf and "product" in df_live.columns and "confidence" in df_live.columns:
+                is_modis = df_live["product"].astype(str) == "modis"
+                conf_num = pd.to_numeric(df_live["confidence"], errors="coerce").fillna(-1)
+                mask &= (~is_modis) | (conf_num >= modis_conf)
+            if viirs_conf is not None and "product" in df_live.columns and "confidence" in df_live.columns:
+                is_viirs = df_live["product"].astype(str).isin(("viirs-snpp", "viirs-noaa20", "viirs-noaa21"))
+                mask &= (~is_viirs) | df_live["confidence"].astype(str).isin(viirs_conf)
+            df_live = df_live.loc[mask]
         if df_live.empty:
             st.info(
-                f"NASA FIRMS returned 0 active-fire detections for {live_ds.region_label} "
+                f"NASA FIRMS returned 0 matching detections for {live_ds.region_label} "
                 f"between {date_start} and {date_end}. This is verified zero observations, not a failure."
             )
             return
@@ -922,7 +965,7 @@ def render_map_tab(spans: dict, cb: MapCallbacks) -> None:
         map_key = map_data_key(
             mode=f"{mode}_live", df=df, id_col="detection_id",
             display=(live_ds.exec_id, color_mode, show_density,
-                     grid_deg if show_density else None, show_boundary, bbox))
+                     grid_deg if show_density else None, show_boundary, bbox, products, satellites))
     else:
         if mode == "detections":
             db_st = query.duckdb_status()
@@ -937,8 +980,7 @@ def render_map_tab(spans: dict, cb: MapCallbacks) -> None:
                     f"- How to enable: {db_st['remediation']}\n\n"
                     "No synthetic fire detections or fictional map points are generated."
                 )
-                if bbox:
-                    _offer_live_firms_fetch("Fetch global NASA FIRMS observations directly into this deployment.")
+                _offer_live_firms_fetch("Fetch global NASA FIRMS observations directly into this deployment.")
                 return
         else:
             clu_st = query.artifact_status("2C", "clusters.parquet")
@@ -973,25 +1015,34 @@ def render_map_tab(spans: dict, cb: MapCallbacks) -> None:
             return
         cov_start = query.coverage_for(date_start, spans)["status"]
         cov_end = query.coverage_for(date_end, spans)["status"]
+        only_noaa_selected = bool(satellites) and not any(s in ("Terra", "Aqua", "N") for s in satellites)
         if cov_start == "unavailable" and cov_end == "unavailable" and total == 0:
             st.warning(
-                f"Selected range ({date_start} to {date_end}) is outside the local 2023 USA pilot archive "
-                f"(2023-01-01 to 2023-12-31): 0 local archive records."
+                f"Selected range ({date_start} to {date_end}) is outside the local 2023 USA archive "
+                "(2023-01-01 to 2023-12-31): 0 local archive records. Retrieve live NASA FIRMS data below."
             )
-            if mode == "detections" and bbox:
-                _offer_live_firms_fetch(f"Retrieve NASA FIRMS observations for {region_label} ({date_start}..{date_end}, max {15} days).")
+            if mode == "detections":
+                _offer_live_firms_fetch(f"Retrieve NASA FIRMS observations for {region_label} ({date_start}..{date_end}).")
             return
         if total == 0:
-            st.info(
-                f"No records match these filters in the local 2023 USA pilot archive for **{region_label}**. "
-                "California/USA observations are never reused for external regions."
-            )
-            if mode == "detections" and bbox:
+            if only_noaa_selected and mode == "detections":
+                st.info(
+                    "No records match these filters in the local 2023 archive because NOAA-20 / NOAA-21 "
+                    "are not indexed in the local DuckDB file; retrieve them directly via NASA FIRMS below."
+                )
+            else:
+                st.info(
+                    f"No records match these filters in the local 2023 archive for **{region_label}**. "
+                    "California/USA observations are never reused for external regions."
+                )
+            if mode == "detections":
                 _offer_live_firms_fetch(f"Fetch NASA FIRMS observations for {region_label} via the live Area API.")
             return
 
-        if mode == "detections" and bbox:
-            _offer_live_firms_fetch(f"Local 2023 archive active ({total:,} matches) · optionally refresh via live NASA FIRMS API.")
+        if mode == "detections":
+            _offer_live_firms_fetch(
+                f"Local 2023 archive active ({total:,} matches) · fetch live NASA FIRMS to refresh or include NOAA-20/21."
+            )
 
         try:
             if mode == "detections":

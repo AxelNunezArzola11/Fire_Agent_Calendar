@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from .. import settings
+from ..acquisition import sensors
 from ..analytics import baselines, confidence
 from ..processing import regions
 from . import aoi as aoi_mod
@@ -30,9 +32,22 @@ SCOPES_BY_METRIC: dict[str, list[str]] = {}
 for _metric, _scope in baselines.SERIES_SPECS:
     SCOPES_BY_METRIC.setdefault(_metric, []).append(_scope)
 
+DYNAMIC_SCOPES_BY_METRIC: dict[str, list[str]] = {
+    "detection": [
+        "raw", "modis", "viirs-snpp", "viirs-noaa20", "viirs-noaa21",
+        "Terra", "Aqua", "N", "NOAA-20", "NOAA-21",
+    ],
+    "frp": ["modis", "viirs-snpp", "viirs-noaa20", "viirs-noaa21"],
+}
+
 SCOPE_LABELS = {"raw": "Raw (all sensors)", "modis": "MODIS",
-                "viirs-snpp": "VIIRS S-NPP", "Terra": "MODIS Terra",
+                "viirs-snpp": "VIIRS S-NPP",
+                "viirs-noaa20": "VIIRS NOAA-20",
+                "viirs-noaa21": "VIIRS NOAA-21",
+                "Terra": "MODIS Terra",
                 "Aqua": "MODIS Aqua", "N": "VIIRS S-NPP",
+                "NOAA-20": "VIIRS NOAA-20",
+                "NOAA-21": "VIIRS NOAA-21",
                 "harmonized": "Harmonized", "count": "Cluster count",
                 "viirs": "VIIRS detections in clusters"}
 
@@ -162,7 +177,10 @@ def resolve_analytics_window(
     e_shared = filters.coerce_day(shared_end)
     if mode == "sidebar":
         return (s_shared, e_shared, "sidebar") if s_shared <= e_shared else (e_shared, s_shared, "sidebar")
-    # auto: follow shared range when user picked a multi-day window; expand single-day map snapshots
+    # auto: preserve dates outside local archive span; follow multi-day shared range;
+    # otherwise expand single-day pilot snapshots to the available pilot span.
+    if s_shared < available_start or e_shared > available_end:
+        return (s_shared, e_shared, "sidebar") if s_shared <= e_shared else (e_shared, s_shared, "sidebar")
     if s_shared < e_shared:
         return s_shared, e_shared, "sidebar"
     return available_start, available_end, "auto-expanded"
@@ -189,62 +207,108 @@ def _fmt_stat(value) -> str:
     return str(value)
 
 
+def is_date_range_outside_local_pilot(
+    date_start: str,
+    date_end: str,
+    min_avail: str = DEFAULT_HISTORY_START,
+    max_avail: str = DEFAULT_HISTORY_END,
+) -> bool:
+    """True when either bound falls outside the precomputed local archive span."""
+    return date_start < min_avail or date_end > max_avail
+
+
 def _active_region_context() -> dict:
     import streamlit as st
 
-    from .. import settings as _settings
-
     aoi_mode = st.session_state.get(filters.KEY_AOI_MODE, "full")
-    reg_id = st.session_state.get(filters.KEY_AOI_REGION, "california")
-    label = "Full 2023 Pilot Archive (United States)"
-    bbox = None
+    resolved = None
+    aoi_error = ""
     try:
-        bbox = aoi_mod.resolve_bbox(
-            mode=aoi_mode,
-            region_id=reg_id,
-            custom=(
-                st.session_state.get(filters.KEY_AOI_W),
-                st.session_state.get(filters.KEY_AOI_S),
-                st.session_state.get(filters.KEY_AOI_E),
-                st.session_state.get(filters.KEY_AOI_N),
-            ),
-            viewport=st.session_state.get("cal_map_bbox"),
-            saved=(
-                aoi_mod.load_aois(_settings.CAL_AOI_PATH).get(
-                    st.session_state.get(filters.KEY_AOI_SAVED, "")
-                )
-                or None
-            ),
+        resolved = aoi_mod.resolve_session_aoi(
+            st.session_state,
+            aoi_path=settings.CAL_AOI_PATH,
+            include_session_fallback=True,
         )
-    except aoi_mod.AoIError:
-        bbox = None
-    if aoi_mode == "region":
-        label = regions.region_label(reg_id)
-    elif aoi_mode == "custom" and bbox:
-        label = f"Custom bbox ({bbox[0]:.2f}..{bbox[2]:.2f}, {bbox[1]:.2f}..{bbox[3]:.2f})"
-    elif aoi_mode == "viewport" and bbox:
-        label = f"Map viewport ({bbox[0]:.2f}..{bbox[2]:.2f}, {bbox[1]:.2f}..{bbox[3]:.2f})"
-    elif aoi_mode == "saved" and bbox:
-        label = f"Saved AOI: {st.session_state.get(filters.KEY_AOI_SAVED, 'custom')}"
-    return {"mode": aoi_mode, "region_id": reg_id, "label": label, "bbox": bbox}
+    except aoi_mod.AoIError as exc:
+        aoi_error = str(exc)
+    if resolved is not None:
+        return {
+            "mode": aoi_mode,
+            "region_id": resolved.region_id,
+            "label": resolved.label,
+            "bbox": resolved.bbox,
+            "source": resolved.source,
+            "aoi_error": "",
+        }
+    return {
+        "mode": aoi_mode,
+        "region_id": None,
+        "label": "CONUS / USA Archive Extent",
+        "bbox": None,
+        "source": "none",
+        "aoi_error": aoi_error,
+    }
 
 
-def _render_regional_analytics(region_ctx: dict) -> None:
-    """Render regional time-series analytics from local DuckDB or retrieved live FIRMS data."""
+def _render_regional_analytics(
+    region_ctx: dict,
+    *,
+    forced_window: tuple[str, str] | None = None,
+) -> None:
+    """Render dynamic multi-year/regional time-series analytics from DuckDB or live FIRMS."""
     import streamlit as st
 
     from ..pipeline import regional
 
+    if region_ctx.get("aoi_error"):
+        st.error(f"Area of interest error: {region_ctx['aoi_error']}")
+        return
+
     live_ds = st.session_state.get("cal_live_regional")
     bbox = region_ctx["bbox"]
+    products = tuple(st.session_state.get(filters.KEY_PRODUCTS, list(query.PRODUCTS)))
+    satellites = tuple(st.session_state.get(filters.KEY_SATELLITES, list(query.SATELLITES)))
+    modis_conf = st.session_state.get(filters.KEY_MODIS_CONF, 0) or None
+    viirs_conf = tuple(st.session_state.get(filters.KEY_VIIRS_CONF, list(query.VIIRS_CONFIDENCE)))
+    firms_ready = bool(settings.get_setting("FIRMS_MAP_KEY", ""))
+
+    # Keep dedicated dynamic start/end inputs synced when sidebar dates or forced_window change
+    if forced_window:
+        st.session_state["cal_an_reg_start"], st.session_state["cal_an_reg_end"] = forced_window
+    else:
+        st.session_state.setdefault("cal_an_reg_start", DEFAULT_HISTORY_START)
+        st.session_state.setdefault("cal_an_reg_end", DEFAULT_HISTORY_END)
+        filters.sync_inputs_from_range(
+            st.session_state,
+            start_key="cal_an_reg_start",
+            end_key="cal_an_reg_end",
+            sentinel_key="cal_an_reg_synced",
+        )
+
+    c_d1, c_d2 = st.columns(2)
+    with c_d1:
+        raw_start = st.text_input("Analytics Start (UTC)", key="cal_an_reg_start", placeholder="YYYY-MM-DD")
+    with c_d2:
+        raw_end = st.text_input("Analytics End (UTC)", key="cal_an_reg_end", placeholder="YYYY-MM-DD")
+    try:
+        d_start = filters.coerce_day(raw_start)
+        d_end = filters.coerce_day(raw_end)
+        if d_start > d_end:
+            d_start, d_end = d_end, d_start
+    except ValueError as exc:
+        st.error(f"Invalid analytics date range: {exc}")
+        return
+
     live_matches = (
         live_ds is not None
-        and live_ds.bbox == bbox
+        and (bbox is None or live_ds.bbox == bbox)
+        and live_ds.date_start == d_start
+        and live_ds.date_end == d_end
     )
 
     metric_opts = ("detection", "frp")
     metric = st.selectbox(
-        "Metric (regional series)",
+        "Metric (multi-year / regional)",
         options=list(metric_opts),
         key="cal_an_reg_metric",
         format_func=lambda m: {
@@ -254,94 +318,182 @@ def _render_regional_analytics(region_ctx: dict) -> None:
     )
     if live_matches:
         avail_prods = sorted({str(p) for p in live_ds.df["product"].dropna().unique()})
-        scope_opts = (
-            ["raw", *avail_prods]
-            if metric == "detection"
-            else (avail_prods or ["modis", "viirs-snpp"])
-        )
+        avail_sats = sorted({
+            sensors.canonical_satellite(str(s), product=str(p))
+            for s, p in zip(live_ds.df["satellite"], live_ds.df["product"])
+            if pd.notna(s)
+        })
+        if metric == "detection":
+            scope_opts = list(dict.fromkeys(["raw", *avail_prods, *avail_sats]))
+        else:
+            scope_opts = avail_prods or [p for p in products if p in DYNAMIC_SCOPES_BY_METRIC["frp"]] or list(DYNAMIC_SCOPES_BY_METRIC["frp"])
     else:
-        scope_opts = (
-            ["raw", "modis", "viirs-snpp", "Terra", "Aqua", "N"]
-            if metric == "detection"
-            else ["modis", "viirs-snpp"]
-        )
+        scope_opts = list(DYNAMIC_SCOPES_BY_METRIC[metric])
+    if st.session_state.get("cal_an_reg_scope") not in scope_opts:
+        st.session_state["cal_an_reg_scope"] = scope_opts[0]
     scope = st.selectbox(
-        "Scope (regional series)",
+        "Scope (multi-year / regional)",
         options=scope_opts,
         key="cal_an_reg_scope",
         format_func=lambda s: SCOPE_LABELS.get(s, s),
     )
     grain = st.selectbox(
-        "Grain (regional series)",
+        "Grain (multi-year / regional)",
         options=["daily", "weekly", "monthly"],
         key="cal_an_reg_grain",
     )
 
+    avail = sensors.evaluate_availability(
+        d_start,
+        d_end,
+        products,
+        satellites,
+        firms_key_configured=firms_ready,
+        region_label=region_ctx["label"],
+        live_dataset=live_ds if live_matches else None,
+    )
+
     if live_matches:
-        d_start, d_end = live_ds.date_start, live_ds.date_end
         st.success(
-            f"Using newly retrieved NASA FIRMS observations for **{live_ds.region_label}** "
-            f"(`{d_start}` to `{d_end}`, exec `{live_ds.exec_id[:8]}`, "
-            f"{live_ds.n_detections:,} normalized detections across {', '.join(live_ds.sources)})."
+            f"Data origin: **Newly retrieved NASA FIRMS API** · Region: **{live_ds.region_label}** · "
+            f"Window: `{d_start}` to `{d_end}` · Exec `{live_ds.exec_id[:8]}` · "
+            f"Sources: `{', '.join(live_ds.sources) or 'none'}` · "
+            f"{live_ds.n_detections:,} normalized detections."
         )
-        rows = regional.build_regional_timeseries(
-            live_ds.df,
-            metric=metric,
-            scope=scope,
-            grain=grain,
-            date_start=d_start,
-            date_end=d_end,
-            region_label=live_ds.region_label,
-            exec_id=live_ds.exec_id,
-        )
-    else:
-        shared_s = filters.coerce_day(
-            st.session_state.get(filters.KEY_RANGE_START, DEFAULT_HISTORY_START)
-        )
-        shared_e = filters.coerce_day(
-            st.session_state.get(filters.KEY_RANGE_END, DEFAULT_HISTORY_END)
-        )
-        d_start, d_end, _ = resolve_analytics_window(
-            shared_s,
-            shared_e,
-            mode=st.session_state.get(KEY_AN_RANGE_MODE, "auto"),
-            custom_start=st.session_state.get(KEY_AN_START),
-            custom_end=st.session_state.get(KEY_AN_END),
-        )
-        db_st = query.duckdb_status()
-        if not db_st["available"]:
-            st.warning(f"Local DuckDB geospatial archive unavailable ({db_st['status']}): {db_st['reason']}")
-            return
-        local_n = query.count_detections(date_start=d_start, date_end=d_end, bbox=bbox)
-        if local_n == 0:
+        if live_ds.errors:
+            st.warning("; ".join(live_ds.errors))
+        for note in avail["sensor_notes"]:
+            st.info(note)
+        if live_ds.n_detections == 0:
             st.info(
-                f"**{region_ctx['label']}** has **0 recorded observations** in the local 2023 "
-                f"USA pilot archive for `{d_start}` to `{d_end}` (lon `{bbox[0]:.2f}..{bbox[2]:.2f}`, "
-                f"lat `{bbox[1]:.2f}..{bbox[3]:.2f}`). USA observations are never reused for other regions."
-            )
-            st.caption(
-                "To analyze detections outside the 2023 USA pilot archive, use the "
-                "Live NASA FIRMS retrieval control in the Activity Map or Pipeline section."
+                f"NASA FIRMS returned **0 detections** for **{live_ds.region_label}** across "
+                f"`{d_start}` to `{d_end}` (sources checked: `{', '.join(live_ds.sources) or 'none'}`). "
+                "Zero observations are reported directly without fabricating activity."
             )
             st.info(METHODOLOGY_NOTE)
             return
-        st.caption(
-            f"Computing regional trailing series for **{region_ctx['label']}** over {local_n:,} local "
-            f"DuckDB detections (`{d_start}` to `{d_end}`, `{region_ctx['bbox'][0]:.2f}..{region_ctx['bbox'][2]:.2f}`, "
-            f"`{region_ctx['bbox'][1]:.2f}..{region_ctx['bbox'][3]:.2f}`)."
-        )
         rows = query.query_regional_timeseries(
             date_start=d_start,
             date_end=d_end,
-            bbox=bbox,
+            bbox=live_ds.bbox,
             metric=metric,
             scope=scope,
             grain=grain,
-            products=tuple(st.session_state.get(filters.KEY_PRODUCTS, list(query.PRODUCTS))),
-            satellites=tuple(st.session_state.get(filters.KEY_SATELLITES, list(query.SATELLITES))),
-            region_label=region_ctx["label"],
+            products=products,
+            satellites=satellites,
+            modis_conf_min=modis_conf,
+            viirs_conf=viirs_conf,
+            region_label=live_ds.region_label,
+            extra_df=live_ds.df,
+        )
+        _render_charts_and_notables(rows, show_baseline_warning=False)
+        return
+
+    # Local DuckDB path (available only within local archive span and pre-indexed sensors)
+    outside_dates = is_date_range_outside_local_pilot(d_start, d_end)
+    only_noaa_selected = bool(satellites) and not any(s in ("Terra", "Aqua", "N") for s in satellites)
+    db_st = query.duckdb_status()
+    local_n = 0
+    if db_st["available"] and not outside_dates and not only_noaa_selected:
+        local_n = query.count_detections(
+            date_start=d_start,
+            date_end=d_end,
+            products=products,
+            satellites=satellites,
+            bbox=bbox,
+            modis_conf_min=modis_conf,
+            viirs_conf=viirs_conf,
         )
 
+    def _render_firms_fetch_controls(prompt_reason: str) -> None:
+        st.info(prompt_reason)
+        for note in avail["sensor_notes"]:
+            st.warning(note)
+        if bbox is None:
+            st.warning(
+                "Select a Geographic area of interest in the sidebar (named region, point + radius, "
+                "custom bbox, or saved area) before retrieving live NASA FIRMS observations."
+            )
+            return
+        if not firms_ready:
+            st.warning(
+                "Missing configuration: `FIRMS_MAP_KEY` is required in `.env` or Streamlit Secrets "
+                "to retrieve NASA FIRMS data beyond the local 2023 USA archive."
+            )
+            return
+        if not avail["firms_sources"]:
+            st.warning(
+                "No NASA FIRMS source supports this combination of dates and selected satellites."
+            )
+            return
+        btn_label = f"Retrieve & Analyze NASA FIRMS ({d_start} to {d_end})"
+        if st.button(btn_label, key="cal_an_fetch_firms"):
+            try:
+                with st.spinner(
+                    f"Retrieving NASA FIRMS ({', '.join(avail['firms_sources'])}) "
+                    f"for {region_ctx['label']} ({d_start}..{d_end})…"
+                ):
+                    ds = regional.fetch_firms_regional(
+                        bbox=bbox,
+                        date_start=d_start,
+                        date_end=d_end,
+                        region_id=region_ctx["region_id"] or region_ctx["mode"],
+                        region_label=region_ctx["label"],
+                        products=products,
+                        satellites=satellites,
+                    )
+                st.session_state["cal_live_regional"] = ds
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+    if local_n == 0:
+        if outside_dates:
+            reason = (
+                f"Window `{d_start}` to `{d_end}` is outside the local 2023 USA DuckDB archive "
+                "(2023-01-01 to 2023-12-31). Multi-year data can be retrieved directly from NASA FIRMS "
+                f"for `{', '.join(avail['firms_sources']) or 'supported sensors'}` without reusing 2023 observations."
+            )
+        elif only_noaa_selected:
+            reason = (
+                "Selected NOAA-20 / NOAA-21 sensors are not stored in the local 2023 DuckDB file; "
+                "retrieve their NASA FIRMS records directly below."
+            )
+        elif not db_st["available"]:
+            reason = (
+                f"Local DuckDB archive unavailable ({db_st['status']}: {db_st['reason']}). "
+                "Retrieve regional/multi-year observations directly via NASA FIRMS below."
+            )
+        else:
+            reason = (
+                f"**{region_ctx['label']}** has **0 recorded observations** in the local DuckDB archive "
+                f"for `{d_start}` to `{d_end}`. External regions are never backfilled from USA data."
+            )
+        _render_firms_fetch_controls(reason)
+        st.info(METHODOLOGY_NOTE)
+        return
+
+    st.caption(
+        f"Data origin: **Local DuckDB archive** · **{region_ctx['label']}** · {local_n:,} detections "
+        f"(`{d_start}` to `{d_end}`)."
+    )
+    if firms_ready and any(s in satellites for s in ("NOAA-20", "NOAA-21")):
+        _render_firms_fetch_controls(
+            "Local DuckDB contains MODIS & VIIRS S-NPP for 2023; fetch live NASA FIRMS to include NOAA-20 / NOAA-21 in this window."
+        )
+    rows = query.query_regional_timeseries(
+        date_start=d_start,
+        date_end=d_end,
+        bbox=bbox,
+        metric=metric,
+        scope=scope,
+        grain=grain,
+        products=products,
+        satellites=satellites,
+        modis_conf_min=modis_conf,
+        viirs_conf=viirs_conf,
+        region_label=region_ctx["label"],
+    )
     _render_charts_and_notables(rows, show_baseline_warning=False)
 
 
@@ -447,6 +599,31 @@ def render_analytics_tab(records: list[dict] | None = None) -> None:
     region_ctx = _active_region_context()
     live_ds = st.session_state.get("cal_live_regional")
     has_regional = (region_ctx["bbox"] is not None) or (live_ds is not None)
+    products = tuple(st.session_state.get(filters.KEY_PRODUCTS, list(query.PRODUCTS)))
+    satellites = tuple(st.session_state.get(filters.KEY_SATELLITES, list(query.SATELLITES)))
+    only_noaa_selected = bool(satellites) and not any(s in ("Terra", "Aqua", "N") for s in satellites)
+    try:
+        shared_s = filters.coerce_day(
+            st.session_state.get(filters.KEY_RANGE_START, DEFAULT_HISTORY_START)
+        )
+        shared_e = filters.coerce_day(
+            st.session_state.get(filters.KEY_RANGE_END, DEFAULT_HISTORY_END)
+        )
+    except ValueError:
+        shared_s, shared_e = DEFAULT_HISTORY_START, DEFAULT_HISTORY_END
+    sidebar_outside = is_date_range_outside_local_pilot(shared_s, shared_e)
+    reg_s_ss = st.session_state.get("cal_an_reg_start")
+    reg_e_ss = st.session_state.get("cal_an_reg_end")
+    reg_outside = bool(
+        reg_s_ss
+        and reg_e_ss
+        and is_date_range_outside_local_pilot(str(reg_s_ss), str(reg_e_ss))
+    )
+    needs_dynamic = has_regional or sidebar_outside or only_noaa_selected or reg_outside
+
+    db_st = query.duckdb_status()
+    firms_ready = bool(settings.get_setting("FIRMS_MAP_KEY", ""))
+    dynamic_available = bool(db_st["available"] or firms_ready or live_ds is not None or has_regional)
 
     if records is None and anom_st is not None:
         run_meta = anom_st.get("run_meta") or {}
@@ -469,8 +646,8 @@ def render_analytics_tab(records: list[dict] | None = None) -> None:
                 f"- How to configure: {anom_st['remediation']}\n\n"
                 "No anomaly scores or baselines are fabricated when Stage 4C outputs are absent or incomplete."
             )
-            if has_regional:
-                st.info("Regional analytics mode remains available below for the selected region.")
+            if dynamic_available:
+                st.info("Multi-year / regional DuckDB & NASA FIRMS analytics remain available below.")
             else:
                 st.info(METHODOLOGY_NOTE)
                 return
@@ -481,24 +658,38 @@ def render_analytics_tab(records: list[dict] | None = None) -> None:
         except FileNotFoundError as exc:
             st.warning("Historical anomaly output unavailable.")
             st.info(f"{exc}. No anomalies are fabricated when Stage 4C outputs are absent.")
-            if not has_regional:
+            if not dynamic_available:
                 st.info(METHODOLOGY_NOTE)
                 return
             records = []
 
-    if has_regional:
-        source_choices = ["regional", "pilot"] if records else ["regional"]
-        source_labels = {
-            "regional": f"Selected region ({region_ctx['label']})",
-            "pilot": "Pinned 2023 USA pilot archive (Stage 4C)",
-        }
-        chosen_source = st.radio(
-            "Analytics scope",
-            options=source_choices,
-            key=KEY_AN_SOURCE,
-            horizontal=True,
-            format_func=lambda s: source_labels[s],
+    if records or dynamic_available:
+        source_choices = ["pilot", "regional"] if (records and dynamic_available) else (
+            ["regional"] if dynamic_available else ["pilot"]
         )
+        default_source = "regional" if (needs_dynamic or not records) and "regional" in source_choices else source_choices[0]
+        prev_dynamic = st.session_state.get("cal_an_prev_dynamic")
+        if KEY_AN_SOURCE not in st.session_state or st.session_state[KEY_AN_SOURCE] not in source_choices:
+            st.session_state[KEY_AN_SOURCE] = default_source
+        elif needs_dynamic and prev_dynamic is False and "regional" in source_choices:
+            st.session_state[KEY_AN_SOURCE] = "regional"
+        st.session_state["cal_an_prev_dynamic"] = needs_dynamic
+
+        if len(source_choices) > 1:
+            source_labels = {
+                "pilot": "Pinned Stage 4C Baseline Archive (2023 USA · MODIS + VIIRS S-NPP)",
+                "regional": f"Dynamic Multi-Year / Regional ({region_ctx['label']} · DuckDB + NASA FIRMS)",
+            }
+            chosen_source = st.radio(
+                "Analytics scope",
+                options=source_choices,
+                key=KEY_AN_SOURCE,
+                horizontal=True,
+                format_func=lambda s: source_labels[s],
+            )
+        else:
+            chosen_source = source_choices[0]
+
         if chosen_source == "regional":
             _render_regional_analytics(region_ctx)
             return
@@ -525,8 +716,8 @@ def render_analytics_tab(records: list[dict] | None = None) -> None:
     if st.session_state.get(KEY_AN_GRAIN) not in grains:
         st.session_state[KEY_AN_GRAIN] = grains[0]
     grain = st.selectbox("Grain", options=grains, key=KEY_AN_GRAIN)
-    st.caption("Sensor selection is intrinsic to scope here; sidebar sensor "
-               "filters apply to the Map.")
+    st.caption("Sensor selection is intrinsic to scope in Stage 4C; switch to "
+               "Dynamic Multi-Year / Regional above for NOAA-20/21, custom years, or AOI bounds.")
     if metric == "frp":
         st.caption(FRP_SCOPE_NOTE)
 
@@ -545,10 +736,10 @@ def render_analytics_tab(records: list[dict] | None = None) -> None:
         options=["auto", "full", "sidebar", "custom"],
         key=KEY_AN_RANGE_MODE,
         format_func=lambda m: {
-            "auto": f"Auto (full span {min_avail}..{max_avail} when sidebar is a single day)",
-            "full": f"Full dataset span ({min_avail} to {max_avail})",
+            "auto": f"Auto (Stage 4C baseline {min_avail}..{max_avail}, or sidebar dates when outside)",
+            "full": f"Stage 4C baseline span ({min_avail} to {max_avail})",
             "sidebar": "Follow sidebar From/To dates",
-            "custom": "Custom Historical Analytics dates",
+            "custom": "Custom Historical Analytics dates (any year via FIRMS)",
         }[m],
     )
     if range_mode == "custom":
@@ -559,8 +750,6 @@ def render_analytics_tab(records: list[dict] | None = None) -> None:
             st.text_input("Analytics End (UTC)", key=KEY_AN_END, placeholder="YYYY-MM-DD")
 
     try:
-        shared_s = filters.coerce_day(st.session_state.get(filters.KEY_RANGE_START, DEFAULT_HISTORY_START))
-        shared_e = filters.coerce_day(st.session_state.get(filters.KEY_RANGE_END, DEFAULT_HISTORY_END))
         date_start, date_end, resolved_reason = resolve_analytics_window(
             shared_s,
             shared_e,
@@ -574,9 +763,18 @@ def render_analytics_tab(records: list[dict] | None = None) -> None:
         st.error(f"Invalid analytics date range: {exc}")
         return
 
+    if is_date_range_outside_local_pilot(date_start, date_end, min_avail, max_avail):
+        st.info(
+            f"Selected window (`{date_start}` to `{date_end}`) extends beyond the pinned "
+            f"Stage 4C archive ({min_avail} to {max_avail}). Displaying multi-year "
+            "DuckDB / NASA FIRMS analysis below."
+        )
+        _render_regional_analytics(region_ctx, forced_window=(date_start, date_end))
+        return
+
     if resolved_reason == "auto-expanded":
         st.caption(
-            f"Showing full historical span `{date_start}` to `{date_end}` "
+            f"Showing full Stage 4C baseline span `{date_start}` to `{date_end}` "
             f"(sidebar is set to single daily snapshot `{shared_s}`)."
         )
     else:
