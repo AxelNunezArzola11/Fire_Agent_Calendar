@@ -127,7 +127,10 @@ def run_pipeline(date_start: str, date_end: str, *, events_conn,
                  top_clusters: int = TOP_CLUSTERS,
                  top_events: int = TOP_EVENTS,
                  l2_match: bool = False,
-                 bbox: tuple | None = None) -> PipelineResult:
+                 bbox: tuple | None = None,
+                 live_dataset=None,
+                 fetch_live_firms: bool = False,
+                 region_label: str = "") -> PipelineResult:
     """Execute the full pipeline (never raises on stage faults).
 
     Raises ValueError only for malformed input (bad dates, inverted
@@ -140,7 +143,7 @@ def run_pipeline(date_start: str, date_end: str, *, events_conn,
     from ..experimental.frp_operator_pilot import (
         operator as oop, results as oor, validation as oop_validation)
     from ..ui import filters, query
-    from . import exports_csv, payloads
+    from . import exports_csv, payloads, regional
 
     started = _utcnow()
     t_all = time.monotonic()
@@ -151,13 +154,15 @@ def run_pipeline(date_start: str, date_end: str, *, events_conn,
         raise ValueError(f"invalid date range: {exc}")
     if start_day > end_day:
         raise ValueError("Start Date must not be later than End Date.")
-    catalog = json.loads(Path(settings.CATALOG_PATH).read_text(
-        encoding="utf-8"))
+    cat_path = settings.resolve_repo_path(settings.CATALOG_PATH)
+    catalog = json.loads(cat_path.read_text(encoding="utf-8")) if cat_path.is_file() else {}
     spans = query.catalog_spans(catalog)
     fingerprint = query.fingerprint()
     config = {"operator_cap": operator_cap, "top_clusters": top_clusters,
               "top_events": top_events, "l2_match": bool(l2_match),
               "bbox": list(bbox) if bbox else None,
+              "region_label": region_label or ("Custom bbox" if bbox else "USA pilot"),
+              "data_origin": "firms_live_api" if (live_dataset is not None or fetch_live_firms) else "local_pilot_archive",
               "exec_2b": settings.CAL_EXEC_2B,
               "exec_2c": settings.CAL_EXEC_2C,
               "exec_2d": settings.CAL_EXEC_2D}
@@ -184,6 +189,185 @@ def run_pipeline(date_start: str, date_end: str, *, events_conn,
 
     chain_names = [getattr(p, "name", "?")
                    for p in (getattr(chain, "providers", None) or [])]
+
+    # -- live regional FIRMS path (outside local 2023 USA pilot or explicit live fetch) --
+    if live_dataset is None and fetch_live_firms:
+        tick = time.monotonic()
+        stage = _stage("acquisition")
+        if bbox is None:
+            _done(stage, "failed",
+                  "Select an Area of Interest (region, bbox, or point+radius) for live FIRMS retrieval.",
+                  tick)
+            _skip_rest(result, stages, progress,
+                       ["detection", "events", "operator", "validation", "export", "metrics"],
+                       "no data: live acquisition requires an AOI bbox")
+            _finalize(result)
+            return result
+        try:
+            live_dataset = regional.fetch_firms_regional(
+                bbox=bbox,
+                date_start=start_day,
+                date_end=end_day,
+                region_id=region_label or "custom",
+                region_label=region_label or "Selected region",
+            )
+        except Exception as exc:  # noqa: BLE001
+            _done(stage, "failed", f"live FIRMS acquisition failed: {exc}", tick)
+            _skip_rest(result, stages, progress,
+                       ["detection", "events", "operator", "validation", "export", "metrics"],
+                       "no data: acquisition failed")
+            _finalize(result)
+            return result
+        if live_dataset.errors and live_dataset.n_detections == 0:
+            _done(stage, "failed", "; ".join(live_dataset.errors), tick)
+            _skip_rest(result, stages, progress,
+                       ["detection", "events", "operator", "validation", "export", "metrics"],
+                       "no data: acquisition failed")
+            _finalize(result)
+            return result
+        result.acquisition = {
+            "n_detections": live_dataset.n_detections,
+            "n_clusters": 0,
+            "data_origin": "firms_live_api",
+            "sources": list(live_dataset.sources),
+            "region_label": live_dataset.region_label,
+            "firms_exec_id": live_dataset.exec_id,
+        }
+        _done(stage, "ok",
+              f"{live_dataset.n_detections:,} live FIRMS detections for {live_dataset.region_label} "
+              f"({', '.join(live_dataset.sources)}).", tick)
+
+    if live_dataset is not None:
+        if not result.acquisition:
+            tick = time.monotonic()
+            stage = _stage("acquisition")
+            result.acquisition = {
+                "n_detections": live_dataset.n_detections,
+                "n_clusters": 0,
+                "data_origin": "firms_live_api",
+                "sources": list(live_dataset.sources),
+                "region_label": live_dataset.region_label,
+                "firms_exec_id": live_dataset.exec_id,
+            }
+            _done(stage, "ok",
+                  f"{live_dataset.n_detections:,} normalized FIRMS detections ({live_dataset.region_label}).",
+                  tick)
+        if live_dataset.n_detections == 0:
+            _skip_rest(result, stages, progress,
+                       ["detection", "events", "operator"],
+                       f"zero FIRMS observations returned for {live_dataset.region_label}")
+            _skip_rest(result, stages, progress,
+                       ["validation", "export", "metrics"],
+                       "nothing to validate or export")
+            _finalize(result)
+            return result
+
+        # Detection intelligence over live regional timeline
+        tick = time.monotonic()
+        stage = _stage("detection")
+        df_live = live_dataset.df
+        day_series = df_live["acquisition_timestamp_utc"].astype(str).str.slice(0, 10)
+        tl_rows = []
+        for day_val, part in df_live.assign(_d=day_series).groupby("_d", sort=True):
+            frp_vals = part["frp"]
+            tl_rows.append({
+                "day": str(day_val),
+                "n": int(len(part)),
+                "n_modis": int((part["product"] == "modis").sum()),
+                "n_viirs": int(part["product"].astype(str).str.startswith("viirs").sum()),
+                "frp_missing": int(frp_vals.isna().sum()),
+            })
+        det_payload = {
+            "cluster_id": f"regional-{live_dataset.exec_id}",
+            "region": live_dataset.region_label,
+            "data_origin": "firms_live_api",
+            "n_detections": int(len(df_live)),
+            "n_modis": int((df_live["product"] == "modis").sum()),
+            "n_viirs": int(df_live["product"].astype(str).str.startswith("viirs").sum()),
+            "satellites": sorted({str(s) for s in df_live["satellite"].dropna().unique()}),
+            "timeline": tl_rows,
+            "limitations": list(live_dataset.limitations),
+        }
+        outcome = agents_coordinator.analyze(
+            "detections", det_payload["cluster_id"], det_payload, chain=chain)
+        _record_run(result, outcome, "detection-intelligence", det_payload["cluster_id"])
+        result.detections = {"clusters_analyzed": 1, "cluster_ids": [det_payload["cluster_id"]]}
+        _done(stage, "ok", f"regional summary analyzed ({len(df_live):,} detections)", tick)
+
+        tick = time.monotonic()
+        stage = _stage("events")
+        result.events = {"rollup": [], "rollup_truncated": False}
+        _done(stage, "skipped", "Phase 5 archival events store applies to pinned 2023 pilot", tick)
+
+        tick = time.monotonic()
+        stage = _stage("operator")
+        rows_live = df_live.head(operator_cap).to_dict("records")
+        op_out = regional.run_operator_on_frame(df_live.head(operator_cap))
+        records = op_out["records"]
+        agg = op_out["aggregate"]
+        result.operator = {
+            "records": records,
+            "aggregate": agg,
+            "truncated": len(df_live) > operator_cap,
+            "cap": operator_cap,
+            "l2_matched": 0,
+            "l2_note": "L2 matching skipped in live regional session",
+        }
+        sci_payload = {
+            "method_version": "det-frp-oop-v1",
+            "region": live_dataset.region_label,
+            "n": agg["n_observations"],
+            "observed_sum": sum((r.get("observed_frp") or 0.0) for r in records if r["calculation_status"] == "ok"),
+            "expected_sum": sum((r.get("expected_retrieved_frp_MW") or 0.0) for r in records if r["calculation_status"] == "ok"),
+            "by_sensor": {
+                s: {"n": v["n"], "observed": v["observed_sum_MW"], "expected": v["expected_sum_MW"]}
+                for s, v in agg["by_sensor"].items()
+            },
+            "mapping_applied": False,
+            "inputs_missing": list(payloads.SCIENCE_MISSING_INPUTS),
+            "limitations": list(live_dataset.limitations),
+        }
+        sci_outcome = agents_coordinator.analyze(
+            "science", f"regional:{live_dataset.region_label}:{start_day}:{end_day}",
+            sci_payload, chain=chain)
+        _record_run(result, sci_outcome, "science-observer", f"{start_day}:{end_day}")
+        _done(stage, "ok" if agg["n_eligible"] else "partial",
+              f"{agg['n_eligible']}/{agg['n_observations']} eligible in {live_dataset.region_label}", tick)
+
+        tick = time.monotonic()
+        stage = _stage("validation")
+        checks = _validate_result(result, start_day, end_day)
+        result.validation = {
+            "checks": checks,
+            "passed": sum(1 for c in checks if c["passed"]),
+            "failed": sum(1 for c in checks if not c["passed"]),
+        }
+        failed = [c for c in checks if not c["passed"]]
+        _done(stage, "failed" if failed else "ok",
+              "; ".join(c["check"] for c in failed) or f"{len(checks)} checks passed", tick)
+
+        tick = time.monotonic()
+        stage = _stage("export")
+        provenance = f"firms-live {live_dataset.exec_id}; {live_dataset.region_label}"
+        try:
+            result.csvs = {
+                "observations": exports_csv.observation_csv(
+                    records, provenance=provenance, processing_utc=started, execution_id=exec_id),
+                "agents": exports_csv.agent_csv(
+                    result.agent_runs, processing_utc=started, execution_id=exec_id),
+            }
+            _done(stage, "ok", "2 regional CSVs built (metrics follows)", tick)
+        except Exception as exc:  # noqa: BLE001
+            _done(stage, "failed", f"export failed: {exc}", tick)
+
+        tick = time.monotonic()
+        stage = _stage("metrics")
+        _compute_metrics(result, stages, t_all, chain_names, fingerprint)
+        result.csvs["metrics"] = exports_csv.metrics_csv(
+            result.metrics, processing_utc=started, execution_id=exec_id)
+        _done(stage, "ok", f"{len(result.metrics)} metrics + metrics CSV", tick)
+        _finalize(result)
+        return result
 
     # -- acquisition -------------------------------------------------
     tick = time.monotonic()

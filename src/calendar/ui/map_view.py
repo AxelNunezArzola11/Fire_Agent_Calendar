@@ -376,21 +376,33 @@ def sanitize_frame(df: pd.DataFrame,
     return df[mask].copy(), int((~mask).sum())
 
 
-def boundary_layer() -> folium.FeatureGroup:
-    """California approximate-bbox overlay (labeled, versioned).
+def boundary_layer(
+    region: regions.Region | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
+    label: str = "",
+) -> folium.FeatureGroup:
+    """Active region or California approximate-bbox overlay (labeled, versioned).
 
-    This is the only boundary source bundled with the pilot: no
-    country/state/county polygons ship with the app, so no other
-    administrative outlines are drawn (never invented).
+    Administrative polygons do not ship with the app, so the active bounding
+    box is drawn explicitly with its CRS/provenance label and never presented
+    as an official administrative border.
     """
-    region = regions.CALIFORNIA
-    w, s, e, n = region.bbox
+    if region is None and bbox is not None:
+        w, s, e, n = (float(v) for v in bbox)
+        title = label or "Selected Area of Interest"
+        popup_txt = f"{title} — user-defined bounding box (EPSG:4326). NOT an official boundary."
+        tip_txt = f"{title} (bbox)"
+    else:
+        reg = region or regions.CALIFORNIA
+        w, s, e, n = reg.bbox
+        title = reg.label or reg.id
+        popup_txt = f"{title} — {reg.source} ({reg.version}; {reg.crs})."
+        tip_txt = f"{title} (approx. bbox)"
     layer = folium.FeatureGroup(name="Boundaries (approx.)", show=True)
     folium.Rectangle(
         bounds=[[s, w], [n, e]], color=BOUNDARY_COLOR, weight=2, fill=False,
-        popup=(f"California — approximate state-extent bbox "
-               f"({region.version}; {region.crs}). NOT an official boundary."),
-        tooltip="California (approx. bbox)",
+        popup=popup_txt,
+        tooltip=tip_txt,
     ).add_to(layer)
     return layer
 
@@ -405,10 +417,15 @@ def cap_notice(total: int, shown: int, what: str) -> str:
 def build_detection_map(df: pd.DataFrame, *, color_mode: str = "sensor",
                         show_density: bool = False, grid_deg: float = 1.0,
                         show_boundary: bool = True,
-                        fit: tuple[float, float, float, float] | None = None
+                        fit: tuple[float, float, float, float] | None = None,
+                        region: regions.Region | None = None,
+                        region_id: str | None = None,
+                        bbox_label: str = "",
                         ) -> folium.Map:
     """Detection Mode map (per-satellite layers + optional FRP density)."""
     param = _base_map()
+    if region is None and region_id:
+        region = regions.REGIONS.get(region_id)
     df, dropped = sanitize_frame(df, ("latitude", "longitude"))
     param.dropped_rows = dropped
     frp = (pd.to_numeric(df["frp"], errors="coerce")
@@ -456,7 +473,7 @@ def build_detection_map(df: pd.DataFrame, *, color_mode: str = "sensor",
             ).add_to(layer)
         layer.add_to(param)
     if show_boundary:
-        boundary_layer().add_to(param)
+        boundary_layer(region=region, bbox=fit, label=bbox_label).add_to(param)
     _graticule_for(fit).add_to(param)
     folium.LayerControl().add_to(param)
     if fit:
@@ -467,10 +484,15 @@ def build_detection_map(df: pd.DataFrame, *, color_mode: str = "sensor",
 
 def build_cluster_map(df: pd.DataFrame, *, show_extent: bool = True,
                       show_boundary: bool = True,
-                      fit: tuple[float, float, float, float] | None = None
+                      fit: tuple[float, float, float, float] | None = None,
+                      region: regions.Region | None = None,
+                      region_id: str | None = None,
+                      bbox_label: str = "",
                       ) -> folium.Map:
     """Cluster Mode map (centroids + bbox extents; never perimeters)."""
     param = _base_map()
+    if region is None and region_id:
+        region = regions.REGIONS.get(region_id)
     df, dropped = sanitize_frame(df, ("centroid_lat", "centroid_lon"),
                                    ("lat_min", "lon_min"),
                                    ("lat_max", "lon_max"))
@@ -498,7 +520,7 @@ def build_cluster_map(df: pd.DataFrame, *, show_extent: bool = True,
             ).add_to(ext)
         ext.add_to(param)
     if show_boundary:
-        boundary_layer().add_to(param)
+        boundary_layer(region=region, bbox=fit, label=bbox_label).add_to(param)
     _graticule_for(fit).add_to(param)
     folium.LayerControl().add_to(param)
     if fit:
@@ -507,7 +529,8 @@ def build_cluster_map(df: pd.DataFrame, *, show_extent: bool = True,
     return param
 
 
-def legend_html(mode: str, color_mode: str, grid_deg: float | None = None) -> str:
+def legend_html(mode: str, color_mode: str, grid_deg: float | None = None,
+                boundary_label: str = "Active region / pilot bbox") -> str:
     """Map legend (honest styles; no severity language)."""
     if mode == "clusters":
         return f"""
@@ -519,8 +542,8 @@ def legend_html(mode: str, color_mode: str, grid_deg: float | None = None) -> st
         observation count)<br>
         <span style="color:{EXTENT_COLOR}">&#9645;</span> Observation bounding
         box (dashed) — not a fire perimeter<br>
-        <span style="color:{BOUNDARY_COLOR}">&#9645;</span> California
-        approximate bbox — not an official boundary<br>
+        <span style="color:{BOUNDARY_COLOR}">&#9645;</span> {boundary_label}
+         — not an official boundary<br>
         <span style="color:{GRATICULE_COLOR}">&#9783;</span> Graticule in
         layer control when tiles are unreachable
         </div>"""
@@ -541,8 +564,8 @@ def legend_html(mode: str, color_mode: str, grid_deg: float | None = None) -> st
     border:1px solid #ccc;border-radius:6px;padding:10px 14px;font-size:12px;
     line-height:1.7;z-index:9999;max-width:270px">
     <b>Satellite detections</b><br>{dots}
-    <span style="color:{BOUNDARY_COLOR}">&#9645;</span> California approximate
-    bbox — not an official boundary<br>
+    <span style="color:{BOUNDARY_COLOR}">&#9645;</span> {boundary_label}
+     — not an official boundary<br>
     <span style="color:{GRATICULE_COLOR}">&#9783;</span> Graticule in layer
     control when tiles are unreachable{frp_note}
     </div>"""
@@ -798,20 +821,27 @@ def render_map_tab(spans: dict, cb: MapCallbacks) -> None:
         return
     limit = settings.CAL_MAP_RENDER_LIMIT
 
+    aoi_mode = st.session_state.get(filters.KEY_AOI_MODE, "full")
+    reg_id = st.session_state.get(filters.KEY_AOI_REGION)
+    active_reg_id = reg_id if aoi_mode == "region" else None
+    region_label = (
+        regions.region_label(reg_id)
+        if aoi_mode == "region" and reg_id
+        else ("Full 2023 USA Pilot" if not bbox else f"{aoi_mode} AOI")
+    )
+
     col_mode, col_opts = st.columns([1, 3])
     with col_mode:
         st.write(f"### {'Detection Mode' if mode == 'detections' else 'Cluster Mode'}")
     if date_start == date_end:
-        st.caption(f"Showing acquisition date {date_start} (UTC). Widen the "
-                   f"shared range for historical exploration.")
+        st.caption(f"Showing acquisition date {date_start} (UTC) · Region: **{region_label}**.")
     else:
-        st.caption(f"Showing acquisition range {date_start} to {date_end} "
-                   f"(UTC).")
+        st.caption(f"Showing acquisition range {date_start} to {date_end} (UTC) · Region: **{region_label}**.")
     st.caption(tile_source_line())
     st.caption(TILE_OFFLINE_NOTE)
     with col_opts:
         show_boundary = st.checkbox("Boundaries", value=True, key=KEY_SHOW_BOUNDARY,
-                                    help="California approximate bbox (not official).")
+                                    help="Active region or California approximate bbox (not official).")
     if mode == "detections":
         color_mode = st.radio("Marker color", ["sensor", "frp"], key=KEY_COLOR_MODE,
                               horizontal=True,
@@ -824,95 +854,177 @@ def render_map_tab(spans: dict, cb: MapCallbacks) -> None:
         show_extent = st.checkbox("Observation extents (bbox, not perimeters)",
                                   value=True, key=KEY_SHOW_EXTENT)
 
-    if mode == "detections":
-        db_st = query.duckdb_status()
-        if not db_st["available"]:
-            st.session_state[KEY_SELECTED_ID] = None
-            st.warning("Map geospatial detection dataset is unavailable in this deployment.")
-            st.info(
-                f"Required geospatial dataset not configured or present.\n\n"
-                f"- Configured path (`{db_st['env_var']}`): `{db_st['path'] or '(unconfigured)'}` "
-                f"(status: `{db_st['status']}`)\n"
-                f"- Detail: {db_st['reason']}\n"
-                f"- How to enable: {db_st['remediation']}\n\n"
-                "No synthetic fire detections or fictional map points are generated."
+    live_ds = st.session_state.get("cal_live_regional")
+    use_live_ds = (
+        mode == "detections"
+        and live_ds is not None
+        and (bbox is None or live_ds.bbox == bbox)
+        and live_ds.date_start == date_start
+        and live_ds.date_end == date_end
+    )
+
+    def _offer_live_firms_fetch(context_msg: str) -> None:
+        from ..pipeline import regional
+
+        fetch_bbox = bbox or regions.CALIFORNIA.bbox
+        firms_ready = bool(settings.get_setting("FIRMS_MAP_KEY", ""))
+        if not firms_ready:
+            st.caption(
+                "Live global NASA FIRMS retrieval requires `FIRMS_MAP_KEY` in environment or Streamlit Secrets."
             )
             return
+        col_btn, col_note = st.columns([2, 3])
+        with col_btn:
+            if st.button(f"Retrieve live NASA FIRMS ({region_label})", key="cal_map_fetch_firms"):
+                try:
+                    with st.spinner(f"Fetching NASA FIRMS detections for {region_label} ({date_start}..{date_end})…"):
+                        ds = regional.fetch_firms_regional(
+                            bbox=fetch_bbox,
+                            date_start=date_start,
+                            date_end=date_end,
+                            region_id=active_reg_id or aoi_mode,
+                            region_label=region_label,
+                            products=products,
+                        )
+                    st.session_state["cal_live_regional"] = ds
+                    if ds.errors:
+                        st.warning("; ".join(ds.errors))
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+        with col_note:
+            st.caption(context_msg)
+
+    if use_live_ds:
+        st.success(
+            f"Data origin: **Newly retrieved NASA FIRMS API** · Region: **{live_ds.region_label}** · "
+            f"Exec `{live_ds.exec_id[:8]}` · Sources: `{', '.join(live_ds.sources)}` · "
+            f"{live_ds.n_detections:,} normalized detections."
+        )
+        if st.button("Return to local 2023 archive", key="cal_map_clear_live"):
+            st.session_state.pop("cal_live_regional", None)
+            st.rerun()
+        df_live = live_ds.df
+        if df_live.empty:
+            st.info(
+                f"NASA FIRMS returned 0 active-fire detections for {live_ds.region_label} "
+                f"between {date_start} and {date_end}. This is verified zero observations, not a failure."
+            )
+            return
+        total = int(len(df_live))
+        df = df_live.head(limit).copy()
+        st.caption(cap_notice(total, len(df), "live FIRMS detections") + " Order: highest FRP first.")
+        grid_deg = zoom_to_grid(st.session_state.get("cal_map_zoom"))
+        param = cb.build_det_map(df, color_mode=color_mode,
+                                 show_density=show_density, grid_deg=grid_deg,
+                                 show_boundary=show_boundary, fit=bbox or live_ds.bbox,
+                                 region_id=active_reg_id, bbox_label=region_label)
+        map_key = map_data_key(
+            mode=f"{mode}_live", df=df, id_col="detection_id",
+            display=(live_ds.exec_id, color_mode, show_density,
+                     grid_deg if show_density else None, show_boundary, bbox))
     else:
-        clu_st = query.artifact_status("2C", "clusters.parquet")
-        if not clu_st["available"]:
+        if mode == "detections":
+            db_st = query.duckdb_status()
+            if not db_st["available"]:
+                st.session_state[KEY_SELECTED_ID] = None
+                st.warning("Map geospatial detection dataset is unavailable in this deployment.")
+                st.info(
+                    f"Required geospatial dataset not configured or present.\n\n"
+                    f"- Configured path (`{db_st['env_var']}`): `{db_st['path'] or '(unconfigured)'}` "
+                    f"(status: `{db_st['status']}`)\n"
+                    f"- Detail: {db_st['reason']}\n"
+                    f"- How to enable: {db_st['remediation']}\n\n"
+                    "No synthetic fire detections or fictional map points are generated."
+                )
+                if bbox:
+                    _offer_live_firms_fetch("Fetch global NASA FIRMS observations directly into this deployment.")
+                return
+        else:
+            clu_st = query.artifact_status("2C", "clusters.parquet")
+            if not clu_st["available"]:
+                st.session_state[KEY_SELECTED_ID] = None
+                st.warning("Map hotspot cluster artifact is unavailable in this deployment.")
+                st.info(
+                    f"Required cluster dataset is not present.\n\n"
+                    f"- Missing artifact: `{clu_st['path'] or 'clusters.parquet'}` "
+                    f"(status: `{clu_st['status']}`, exec `{clu_st['exec_id'][:8] if clu_st['exec_id'] else 'unconfigured'}`)\n"
+                    f"- Configuration variables: `{clu_st['root_env_var']}`, `{clu_st['env_var']}`\n"
+                    f"- Detail: {clu_st['reason']}\n\n"
+                    "No synthetic hotspot clusters are generated."
+                )
+                return
+
+        try:
+            if mode == "detections":
+                total = cb.count_det(date_start=date_start, date_end=date_end,
+                                     products=products, satellites=satellites, bbox=bbox,
+                                     modis_conf_min=modis_conf, viirs_conf=viirs_conf)
+            else:
+                total = cb.count_clu(date_start=date_start, date_end=date_end, bbox=bbox)
+        except FileNotFoundError as exc:
             st.session_state[KEY_SELECTED_ID] = None
-            st.warning("Map hotspot cluster artifact is unavailable in this deployment.")
-            st.info(
-                f"Required cluster dataset is not present.\n\n"
-                f"- Missing artifact: `{clu_st['path'] or 'clusters.parquet'}` "
-                f"(status: `{clu_st['status']}`, exec `{clu_st['exec_id'][:8] if clu_st['exec_id'] else 'unconfigured'}`)\n"
-                f"- Configuration variables: `{clu_st['root_env_var']}`, `{clu_st['env_var']}`\n"
-                f"- Detail: {clu_st['reason']}\n\n"
-                "No synthetic hotspot clusters are generated."
+            st.warning("Map data source is unavailable in this deployment.")
+            st.info(f"Required dataset could not be opened: {exc}. "
+                    "No synthetic fire detections or clusters are generated.")
+            return
+        except ValueError as exc:
+            st.error(f"Invalid filter: {exc}")
+            return
+        cov_start = query.coverage_for(date_start, spans)["status"]
+        cov_end = query.coverage_for(date_end, spans)["status"]
+        if cov_start == "unavailable" and cov_end == "unavailable" and total == 0:
+            st.warning(
+                f"Selected range ({date_start} to {date_end}) is outside the local 2023 USA pilot archive "
+                f"(2023-01-01 to 2023-12-31): 0 local archive records."
             )
+            if mode == "detections" and bbox:
+                _offer_live_firms_fetch(f"Retrieve NASA FIRMS observations for {region_label} ({date_start}..{date_end}, max {15} days).")
+            return
+        if total == 0:
+            st.info(
+                f"No records match these filters in the local 2023 USA pilot archive for **{region_label}**. "
+                "California/USA observations are never reused for external regions."
+            )
+            if mode == "detections" and bbox:
+                _offer_live_firms_fetch(f"Fetch NASA FIRMS observations for {region_label} via the live Area API.")
             return
 
-    try:
-        if mode == "detections":
-            total = cb.count_det(date_start=date_start, date_end=date_end,
-                                 products=products, satellites=satellites, bbox=bbox,
-                                 modis_conf_min=modis_conf, viirs_conf=viirs_conf)
-        else:
-            total = cb.count_clu(date_start=date_start, date_end=date_end, bbox=bbox)
-    except FileNotFoundError as exc:
-        st.session_state[KEY_SELECTED_ID] = None
-        st.warning("Map data source is unavailable in this deployment.")
-        st.info(f"Required dataset could not be opened: {exc}. "
-                "No synthetic fire detections or clusters are generated.")
-        return
-    except ValueError as exc:
-        st.error(f"Invalid filter: {exc}")
-        return
-    cov_start = query.coverage_for(date_start, spans)["status"]
-    cov_end = query.coverage_for(date_end, spans)["status"]
-    if cov_start == "unavailable" and cov_end == "unavailable" and total == 0:
-        st.error("Selected range is outside verified pilot coverage "
-                 "(2023-01-01 to 2023-12-31): no data available.")
-        return
-    if total == 0:
-        st.info("No records match these filters (verified coverage for these "
-                "dates). This is zero recorded activity, not missing data.")
-        return
+        if mode == "detections" and bbox:
+            _offer_live_firms_fetch(f"Local 2023 archive active ({total:,} matches) · optionally refresh via live NASA FIRMS API.")
 
-    try:
-        if mode == "detections":
-            df = cb.fetch_det(date_start=date_start, date_end=date_end, products=products,
-                              satellites=satellites, bbox=bbox, modis_conf_min=modis_conf,
-                              viirs_conf=viirs_conf, limit=limit)
-            st.caption(cap_notice(total, len(df), "detections") + " Order: highest FRP first.")
-            grid_deg = zoom_to_grid(st.session_state.get("cal_map_zoom"))
-            param = cb.build_det_map(df, color_mode=color_mode,
-                                     show_density=show_density, grid_deg=grid_deg,
-                                     show_boundary=show_boundary, fit=bbox)
-            # grid_deg enters the key only when the density layer is
-            # drawn: otherwise every zoom would remount and lose the
-            # viewport it just set.
-            map_key = map_data_key(
-                mode=mode, df=df, id_col="detection_id",
-                display=(color_mode, show_density,
-                         grid_deg if show_density else None,
-                         show_boundary, bbox))
-        else:
-            df = cb.fetch_clu(date_start=date_start, date_end=date_end, bbox=bbox,
-                              limit=limit, columns=query.CLUSTER_MAP_COLUMNS)
-            st.caption(cap_notice(total, len(df), "clusters") + " Order: largest first.")
-            param = cb.build_clu_map(df, show_extent=show_extent,
-                                     show_boundary=show_boundary, fit=bbox)
-            map_key = map_data_key(mode=mode, df=df, id_col="cluster_id",
-                                   display=(show_extent, show_boundary, bbox))
-    except FileNotFoundError as exc:
-        st.warning("Map data source became unavailable while loading geometry.")
-        st.info(f"{exc}. No synthetic map points are generated.")
-        return
-    except Exception as exc:
-        st.error(f"Map construction failed: {exc}")
-        return
+        try:
+            if mode == "detections":
+                df = cb.fetch_det(date_start=date_start, date_end=date_end, products=products,
+                                  satellites=satellites, bbox=bbox, modis_conf_min=modis_conf,
+                                  viirs_conf=viirs_conf, limit=limit)
+                st.caption(cap_notice(total, len(df), "detections") + " Order: highest FRP first.")
+                grid_deg = zoom_to_grid(st.session_state.get("cal_map_zoom"))
+                param = cb.build_det_map(df, color_mode=color_mode,
+                                         show_density=show_density, grid_deg=grid_deg,
+                                         show_boundary=show_boundary, fit=bbox,
+                                         region_id=active_reg_id, bbox_label=region_label)
+                map_key = map_data_key(
+                    mode=mode, df=df, id_col="detection_id",
+                    display=(color_mode, show_density,
+                             grid_deg if show_density else None,
+                             show_boundary, bbox, active_reg_id))
+            else:
+                df = cb.fetch_clu(date_start=date_start, date_end=date_end, bbox=bbox,
+                                  limit=limit, columns=query.CLUSTER_MAP_COLUMNS)
+                st.caption(cap_notice(total, len(df), "clusters") + " Order: largest first.")
+                param = cb.build_clu_map(df, show_extent=show_extent,
+                                         show_boundary=show_boundary, fit=bbox,
+                                         region_id=active_reg_id, bbox_label=region_label)
+                map_key = map_data_key(mode=mode, df=df, id_col="cluster_id",
+                                       display=(show_extent, show_boundary, bbox, active_reg_id))
+        except FileNotFoundError as exc:
+            st.warning("Map data source became unavailable while loading geometry.")
+            st.info(f"{exc}. No synthetic map points are generated.")
+            return
+        except Exception as exc:
+            st.error(f"Map construction failed: {exc}")
+            return
     dropped = getattr(param, "dropped_rows", 0) or 0
     if dropped:
         st.caption(f"{dropped:,} row(s) omitted from the map (invalid or "

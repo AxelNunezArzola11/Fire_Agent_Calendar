@@ -139,7 +139,8 @@ def _cluster_dets(fingerprint: tuple, cluster_id: str):
 @st.cache_resource(show_spinner="Building map…", max_entries=4)
 def _det_map_cached(fingerprint: tuple, df, color_mode: str,
                     show_density: bool, grid_deg: float,
-                    show_boundary: bool, fit):
+                    show_boundary: bool, fit,
+                    region_id: str | None = None, bbox_label: str = ""):
     """Built detection map, cached (never handed out directly; see below)."""
     import folium as _folium
 
@@ -147,47 +148,49 @@ def _det_map_cached(fingerprint: tuple, df, color_mode: str,
     param = map_view.build_detection_map(df, color_mode=color_mode,
                                          show_density=show_density,
                                          grid_deg=grid_deg,
-                                         show_boundary=show_boundary, fit=fit)
+                                         show_boundary=show_boundary, fit=fit,
+                                         region_id=region_id,
+                                         bbox_label=bbox_label)
     param.get_root().html.add_child(_folium.Element(
         map_view.legend_html("detections", color_mode,
-                             grid_deg if show_density else None)))
+                             grid_deg if show_density else None,
+                             boundary_label=bbox_label or "Active region / pilot bbox")))
     return param
 
 
 def _det_map(fingerprint: tuple, df, color_mode: str, show_density: bool,
-             grid_deg: float, show_boundary: bool, fit):
-    """Private per-render copy of the cached map (concurrency safety).
-
-    streamlit-folium mutates the map object while serializing it, so
-    handing the shared cached object to overlapping renders raises
-    "OrderedDict mutated during iteration" and the map is replaced by
-    an error panel. Each render gets its own deep copy; the cached
-    pristine original is never rendered directly.
-    """
+             grid_deg: float, show_boundary: bool, fit,
+             region_id: str | None = None, bbox_label: str = ""):
+    """Private per-render copy of the cached map (concurrency safety)."""
     return map_view.copy_map(_det_map_cached(
         fingerprint, df, color_mode, show_density, grid_deg,
-        show_boundary, fit))
+        show_boundary, fit, region_id=region_id, bbox_label=bbox_label))
 
 
 @st.cache_resource(show_spinner="Building map…", max_entries=4)
 def _clu_map_cached(fingerprint: tuple, df, show_extent: bool,
-                    show_boundary: bool, fit):
+                    show_boundary: bool, fit,
+                    region_id: str | None = None, bbox_label: str = ""):
     """Built cluster map, cached (never handed out directly; see below)."""
     import folium as _folium
 
     _ = fingerprint
     param = map_view.build_cluster_map(df, show_extent=show_extent,
-                                       show_boundary=show_boundary, fit=fit)
+                                       show_boundary=show_boundary, fit=fit,
+                                       region_id=region_id,
+                                       bbox_label=bbox_label)
     param.get_root().html.add_child(
-        _folium.Element(map_view.legend_html("clusters", "")))
+        _folium.Element(map_view.legend_html(
+            "clusters", "", boundary_label=bbox_label or "Active region / pilot bbox")))
     return param
 
 
 def _clu_map(fingerprint: tuple, df, show_extent: bool, show_boundary: bool,
-             fit):
+             fit, region_id: str | None = None, bbox_label: str = ""):
     """Private per-render copy of the cached map (concurrency safety)."""
-    return map_view.copy_map(_clu_map_cached(fingerprint, df, show_extent,
-                                             show_boundary, fit))
+    return map_view.copy_map(_clu_map_cached(
+        fingerprint, df, show_extent, show_boundary, fit,
+        region_id=region_id, bbox_label=bbox_label))
 
 
 def _map_callbacks(fingerprint: tuple) -> map_view.MapCallbacks:
@@ -220,19 +223,54 @@ def _spans() -> dict:
         return {}
 
 
+def _apply_region_bbox(region_id: str) -> None:
+    """on_click: populate custom bbox inputs from a preset region."""
+    reg = regions.REGIONS.get(region_id)
+    if reg is None:
+        return
+    (st.session_state[filters.KEY_AOI_W],
+     st.session_state[filters.KEY_AOI_S],
+     st.session_state[filters.KEY_AOI_E],
+     st.session_state[filters.KEY_AOI_N]) = reg.bbox
+
+
 def _aoi_controls() -> None:
     """Controls for the active AOI mode (inside the sidebar expander)."""
     mode = st.session_state.get(filters.KEY_AOI_MODE, "full")
     if mode == "region":
-        st.selectbox("Region", options=sorted(regions.REGIONS),
-                     key=filters.KEY_AOI_REGION)
+        opts = sorted(regions.REGIONS)
+        st.selectbox(
+            "Region",
+            options=opts,
+            key=filters.KEY_AOI_REGION,
+            format_func=regions.region_label,
+        )
         region = regions.REGIONS.get(st.session_state.get(filters.KEY_AOI_REGION, ""))
         if region is not None:
-            st.caption(f"{region.version} ({region.crs}): {region.source}")
+            w, s, e, n = region.bbox
+            st.caption(
+                f"{region.version} ({region.crs}) · bbox lon `{w:.2f}..{e:.2f}`, "
+                f"lat `{s:.2f}..{n:.2f}`"
+            )
+            st.caption(region.source)
     elif mode == "custom":
+        st.caption("Quick regional bbox presets:")
+        preset_cols = st.columns(4)
+        for col, rid, short in zip(
+            preset_cols,
+            ("california", "brazil", "spain", "australia"),
+            ("CA", "BR", "ES", "AU"),
+        ):
+            col.button(
+                short,
+                key=f"cal_aoi_preset_{rid}",
+                on_click=_apply_region_bbox,
+                args=(rid,),
+                help=f"Set custom bbox to {regions.region_label(rid)}",
+            )
         with st.expander("Search by place or coordinates"):
             place = st.text_input("Place name", key="cal_geo_place",
-                                  placeholder="e.g. Redding, California")
+                                  placeholder="e.g. Seville, Spain or Manaus, Brazil")
             col_lat, col_lon = st.columns(2)
             with col_lat:
                 plat = st.number_input("Latitude", value=40.59,
@@ -357,13 +395,13 @@ def _sidebar() -> None:
                                 "(low/nominal/high).")
             st.caption("Confidence scales differ by product and are filtered "
                        "independently.")
-        with st.expander("Area of interest (map only)"):
+        with st.expander("Geographic area of interest"):
             st.radio("Area", options=list(filters.AOI_MODES),
                      key=filters.KEY_AOI_MODE,
                      format_func=lambda m: {
-                         "full": "Full pilot (USA)",
-                         "region": "Preset region",
-                         "custom": "Custom bounding box",
+                         "full": "Full pilot (USA 2023)",
+                         "region": "Preset country / region",
+                         "custom": "Custom bounding box / lat-lon",
                          "viewport": "Current map view",
                          "saved": "Saved area"}[m])
             _aoi_controls()
@@ -384,8 +422,11 @@ def _sidebar() -> None:
             for stage, exec_id in sorted(query.phase5_chain().items()):
                 st.write(f"Phase {stage}: `{exec_id[:8]}`"
                          if exec_id else f"Phase {stage}: not built yet")
-        with st.expander("Deployment data status"):
+        with st.expander("Deployment data & AI status"):
+            from src.calendar.agents import providers as providers_mod
+
             ov = query.storage_overview()
+            pstat = providers_mod.provider_status()
             rows = [
                 ("Calendar (2D)", ov["artifacts"]["2D_metrics"]["available"]),
                 ("Map Detections (DuckDB)", ov["duckdb"]["available"]),
@@ -395,9 +436,13 @@ def _sidebar() -> None:
                 ("Export Ready", ov["duckdb"]["available"]
                  and ov["artifacts"]["2B_members"]["available"]
                  and ov["artifacts"]["2C_members"]["available"]),
+                ("NASA FIRMS Live API", bool(settings.get_setting("FIRMS_MAP_KEY", ""))),
+                ("IBM Granite", pstat["granite"]["available"]),
+                ("Qwen", pstat["qwen"]["available"]),
             ]
             for label, ok in rows:
                 st.caption(f"{label}: {'ready' if ok else 'unavailable'}")
+            st.caption(f"AI effective mode: `{pstat['effective_mode']}` (deterministic rules always ready)")
         st.info(calendar_view.METHODOLOGY_NOTE)
 
 

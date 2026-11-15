@@ -45,33 +45,62 @@ class GraniteConfig:
     timeout_s: float = 30.0
     max_attempts: int = 2
     iam_url: str = IAM_URL
+    endpoint_style: str = ""
 
     @classmethod
     def from_settings(cls) -> "GraniteConfig":
-        def _str(name: str, default: str = "") -> str:
-            value = getattr(settings, name, default)
-            return value if isinstance(value, str) else default
+        def _setting(name: str, default: str = "") -> str:
+            val = settings.get_setting(name, default)
+            return val.strip() if isinstance(val, str) else default
 
         def _num(name: str, default):
             value = getattr(settings, name, default)
-            return value if isinstance(value, (int, float)) else default
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return value
+            return default
 
+        raw_key = _setting("CAL_GRANITE_API_KEY") or _setting("WATSONX_API_KEY")
+        raw_proj = _setting("CAL_GRANITE_PROJECT_ID") or _setting("WATSONX_PROJECT_ID")
+        raw_url = (_setting("CAL_GRANITE_BASE_URL") or _setting("WATSONX_URL")).rstrip("/")
+        raw_model = (
+            _setting("CAL_GRANITE_MODEL")
+            or _setting("GRANITE_MODEL_ID", "ibm/granite-4-h-small")
+            or "ibm/granite-4-h-small"
+        )
+        raw_style = _setting("CAL_GRANITE_ENDPOINT_STYLE").lower()
         return cls(
-            api_key=_str("WATSONX_API_KEY"),
-            project_id=_str("WATSONX_PROJECT_ID"),
-            url=_str("WATSONX_URL").rstrip("/"),
-            model=_str("GRANITE_MODEL_ID", "ibm/granite-4-h-small"),
+            api_key=raw_key,
+            project_id=raw_proj,
+            url=raw_url,
+            model=raw_model,
             timeout_s=_num("GRANITE_TIMEOUT_S", 30.0),
             max_attempts=min(int(_num("GRANITE_MAX_ATTEMPTS", 2) or 2),
                              MAX_ATTEMPTS_CAP),
-            iam_url=_str("GRANITE_IAM_URL", IAM_URL) or IAM_URL,
+            iam_url=_setting("GRANITE_IAM_URL", IAM_URL) or IAM_URL,
+            endpoint_style=raw_style,
+        )
+
+    def is_openai_compatible(self) -> bool:
+        """True when configured for an OpenAI-style Granite endpoint instead of watsonx."""
+        if self.endpoint_style == "openai":
+            return True
+        if self.endpoint_style == "watsonx":
+            return False
+        low = self.url.lower().rstrip("/")
+        return (not self.project_id) and (
+            low.endswith("/v1") or low.endswith("/chat/completions")
         )
 
     def status(self) -> dict:
-        missing = [name for name, value in
-                   (("WATSONX_API_KEY", self.api_key),
-                    ("WATSONX_PROJECT_ID", self.project_id),
-                    ("WATSONX_URL", self.url)) if not value]
+        if self.is_openai_compatible():
+            missing = [name for name, value in
+                       (("CAL_GRANITE_API_KEY", self.api_key),
+                        ("CAL_GRANITE_BASE_URL", self.url)) if not value]
+        else:
+            missing = [name for name, value in
+                       (("WATSONX_API_KEY", self.api_key),
+                        ("WATSONX_PROJECT_ID", self.project_id),
+                        ("WATSONX_URL", self.url)) if not value]
         if missing:
             return {"available": False,
                     "reason": f"missing configuration: "
@@ -89,8 +118,9 @@ class GraniteConfig:
             return {"available": False,
                     "reason": "invalid configuration: "
                               "CAL_GRANITE_MAX_ATTEMPTS out of range"}
-        return {"available": True, "reason": f"model {self.model}",
-                "model": self.model}
+        mode_tag = "openai-compatible" if self.is_openai_compatible() else "watsonx.ai"
+        return {"available": True, "reason": f"model {self.model} ({mode_tag})",
+                "model": self.model, "mode": mode_tag}
 
 
 def _requests_post(url, *, headers, json_data=None, form_data=None,
@@ -129,8 +159,11 @@ class GraniteProvider(Provider):
                                  f"({MAX_INPUT_CHARS} chars)")
         started = time.monotonic()
         try:
-            token = self._iam_token()
-            text, meta = self._generate(prompt, system, token)
+            if self._config.is_openai_compatible():
+                text, meta = self._generate_openai(prompt, system)
+            else:
+                token = self._iam_token()
+                text, meta = self._generate(prompt, system, token)
         except _GraniteError as exc:
             latency = (time.monotonic() - started) * 1000.0
             return Attempt(self.name, self.model, False, latency,
@@ -174,7 +207,23 @@ class GraniteProvider(Provider):
             raise _GraniteError("iam token response lacks access_token")
         return token
 
-    def _generate(self, prompt: str, system: str, token: str) -> str:
+    def _generate_openai(self, prompt: str, system: str):
+        base = self._config.url.rstrip("/")
+        url = base if base.endswith("/chat/completions") else f"{base}/chat/completions"
+        body = {
+            "model": self._config.model,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": prompt}],
+            "temperature": 0.0,
+            "max_tokens": GRANITE_MAX_TOKENS,
+        }
+        headers = {
+            "Authorization": f"Bearer {self._config.api_key}",
+            "Content-Type": "application/json",
+        }
+        return self._post_chat(url, headers, body)
+
+    def _generate(self, prompt: str, system: str, token: str):
         # Chat completions (verified live): the text/generation endpoint
         # returns degenerate output for instruct prompts on this model.
         body = {"model_id": self._config.model,
@@ -187,6 +236,9 @@ class GraniteProvider(Provider):
                f"?version={API_VERSION}")
         real_headers = {"Authorization": f"Bearer {token}",
                         "Content-Type": "application/json"}
+        return self._post_chat(url, real_headers, body)
+
+    def _post_chat(self, url: str, headers: dict, body: dict):
         attempts = max(1, min(self._config.max_attempts,
                               MAX_ATTEMPTS_CAP))
         last_error = "no attempts ran"
@@ -194,7 +246,7 @@ class GraniteProvider(Provider):
         for attempt in range(attempts):
             try:
                 response = self._post(
-                    url, headers=real_headers, json_data=body,
+                    url, headers=headers, json_data=body,
                     timeout=self._config.timeout_s)
             except Exception as exc:
                 last_error = f"generation request failed: {type(exc).__name__}"

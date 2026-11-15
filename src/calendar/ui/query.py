@@ -73,16 +73,16 @@ def _safe_segment(value: str, label: str) -> str:
     return cleaned
 
 
-def _registered_exec_ids(runs_path: str | None = None) -> set[str]:
-    """Read execution_id values recorded in analytics_runs.jsonl if present."""
+def _registered_exec_statuses(runs_path: str | None = None) -> dict[str, dict]:
+    """Read latest metadata & completion status per exec_id in analytics_runs.jsonl."""
     raw = (runs_path if runs_path is not None
            else settings.get_setting("CAL_RUNS_PATH", "analytics_runs.jsonl"))
     if not raw:
-        return set()
+        return {}
     p = settings.resolve_repo_path(raw)
     if not p.is_file():
-        return set()
-    ids: set[str] = set()
+        return {}
+    statuses: dict[str, dict] = {}
     try:
         with open(p, encoding="utf-8") as handle:
             for line in handle:
@@ -94,11 +94,22 @@ def _registered_exec_ids(runs_path: str | None = None) -> set[str]:
                 except ValueError:
                     continue
                 eid = rec.get("exec_id") or rec.get("execution_id")
-                if isinstance(eid, str) and eid.strip():
-                    ids.add(eid.strip())
+                if not (isinstance(eid, str) and eid.strip()):
+                    continue
+                key = eid.strip()
+                entry = statuses.setdefault(key, {"exec_id": key})
+                for field in ("stage", "started_at", "completed_at", "status",
+                              "region", "date_range", "outputs", "reason"):
+                    if field in rec and rec[field] is not None:
+                        entry[field] = rec[field]
     except OSError:
-        return set()
-    return ids
+        return {}
+    return statuses
+
+
+def _registered_exec_ids(runs_path: str | None = None) -> set[str]:
+    """Read execution_id values recorded in analytics_runs.jsonl if present."""
+    return set(_registered_exec_statuses(runs_path))
 
 
 def duckdb_status(db_path: str | None = None) -> dict:
@@ -289,10 +300,31 @@ def artifact_status(stage: str, filename: str, exec_id: str | None = None,
     rel_path = Path(analytics_root) / safe_eid / safe_file
     resolved = settings.resolve_repo_path(rel_path)
     exec_dir = settings.resolve_repo_path(Path(analytics_root) / safe_eid)
-    in_runs = safe_eid in _registered_exec_ids()
+    runs = _registered_exec_statuses()
+    run_info = runs.get(safe_eid)
+    in_runs = run_info is not None
+    run_status = str(run_info.get("status", "")).lower() if run_info else "unregistered"
     base["path"] = str(rel_path)
     base["resolved_path"] = str(resolved)
     base["registered_in_runs"] = in_runs
+    base["run_status"] = run_status
+    if run_info:
+        base["run_meta"] = {
+            "stage": run_info.get("stage"),
+            "started_at": run_info.get("started_at"),
+            "completed_at": run_info.get("completed_at"),
+            "region": run_info.get("region"),
+            "date_range": run_info.get("date_range"),
+        }
+    if in_runs and run_status != "complete":
+        return {
+            **base,
+            "status": "incomplete_execution",
+            "reason": (
+                f"Execution {safe_eid[:8]} is recorded with non-complete status "
+                f"{run_status!r} in analytics_runs.jsonl; refusing incomplete output."
+            ),
+        }
     if resolved.is_file() and os.access(resolved, os.R_OK):
         try:
             if resolved.stat().st_size == 0:
@@ -1011,3 +1043,89 @@ def cluster_by_id(cluster_id: str, exec_id: str | None = None) -> dict | None:
     finally:
         con.close()
     return dict(zip(cols, row)) if row else None
+
+
+def discover_completed_exec(stage_prefix: str, filename: str) -> dict | None:
+    """Return latest completed execution metadata in analytics_runs.jsonl with an existing file."""
+    statuses = _registered_exec_statuses()
+    root = _analytics_root()
+    candidates = []
+    for eid, meta in statuses.items():
+        if str(meta.get("status", "")).lower() != "complete":
+            continue
+        stg = str(meta.get("stage", "")).lower()
+        if stage_prefix.lower() not in stg:
+            continue
+        p = settings.resolve_repo_path(Path(root) / eid / filename)
+        if p.is_file() and p.stat().st_size > 0:
+            candidates.append({**meta, "path": str(p)})
+    if not candidates:
+        return None
+    candidates.sort(key=lambda r: str(r.get("completed_at") or r.get("started_at") or ""))
+    return candidates[-1]
+
+
+def query_regional_timeseries(
+    db_path: str | None = None,
+    *,
+    date_start: str,
+    date_end: str,
+    bbox: tuple[float, float, float, float] | None,
+    metric: str = "detection",
+    scope: str = "raw",
+    grain: str = "daily",
+    products: tuple[str, ...] = PRODUCTS,
+    satellites: tuple[str, ...] = SATELLITES,
+    modis_conf_min: int | None = None,
+    viirs_conf: tuple[str, ...] | None = None,
+    region_label: str = "Selected region",
+    extra_df: pd.DataFrame | None = None,
+) -> list[dict]:
+    """Build regional trailing baseline & anomaly series over DuckDB or live FIRMS rows."""
+    from ..pipeline import regional
+
+    if extra_df is not None:
+        df = extra_df.copy()
+        if bbox is not None and not df.empty:
+            w, s, e, n = (float(v) for v in bbox)
+            df = df[
+                (df["longitude"] >= w) & (df["longitude"] <= e)
+                & (df["latitude"] >= s) & (df["latitude"] <= n)
+            ].copy()
+        return regional.build_regional_timeseries(
+            df,
+            metric=metric,
+            scope=scope,
+            grain=grain,
+            date_start=date_start,
+            date_end=date_end,
+            region_label=region_label,
+            exec_id="firms-live",
+        )
+
+    start_ts, stop_ts = _day_bounds(date_start, date_end)
+    where, params = _detection_where(
+        products, satellites, bbox, modis_conf_min, viirs_conf, date_start, date_end
+    )
+    con = _connect_duckdb(db_path)
+    try:
+        df = con.execute(
+            f"SELECT acquisition_timestamp_utc, product, satellite, frp "
+            f"FROM detections WHERE {where} "
+            f"ORDER BY acquisition_timestamp_utc",
+            [start_ts, stop_ts, *params],
+        ).df()
+    except duckdb.Error as exc:
+        raise DataUnavailableError(f"Regional time-series query failed: {exc}") from exc
+    finally:
+        con.close()
+    return regional.build_regional_timeseries(
+        df,
+        metric=metric,
+        scope=scope,
+        grain=grain,
+        date_start=date_start,
+        date_end=date_end,
+        region_label=region_label,
+        exec_id="local-duckdb-regional",
+    )

@@ -173,14 +173,20 @@ CAL_L2_ROOT: str = _env("CAL_L2_ROOT", "l2_data")
 CAL_L2_BUDGET_MB: float = float(_env("CAL_L2_BUDGET_MB", "2048"))
 CAL_L2_PAGE_SIZE: int = int(_env("CAL_L2_PAGE_SIZE", "50"))
 
-# --- IBM Granite fallback (watsonx.ai REST; additive — earlier untouched) ---
+# --- IBM Granite fallback (watsonx.ai REST or OpenAI-compatible; additive) ---
 # Shared keys with the legacy dashboard (own accessors, never logged).
 # Granite is enabled by credential presence; absence fails open to the
 # deterministic fallback, never silently degraded.
+CAL_AI_PROVIDER: str = _env("CAL_AI_PROVIDER", "auto").lower() or "auto"
 WATSONX_API_KEY: str = _clean(_env("WATSONX_API_KEY"))
 WATSONX_PROJECT_ID: str = _clean(_env("WATSONX_PROJECT_ID"))
 WATSONX_URL: str = _clean(_env("WATSONX_URL"))
 GRANITE_MODEL_ID: str = _env("WATSONX_MODEL_ID", "ibm/granite-4-h-small")
+CAL_GRANITE_API_KEY: str = _clean(_env("CAL_GRANITE_API_KEY") or WATSONX_API_KEY)
+CAL_GRANITE_PROJECT_ID: str = _clean(_env("CAL_GRANITE_PROJECT_ID") or WATSONX_PROJECT_ID)
+CAL_GRANITE_BASE_URL: str = _clean(_env("CAL_GRANITE_BASE_URL") or WATSONX_URL)
+CAL_GRANITE_MODEL: str = _env("CAL_GRANITE_MODEL") or GRANITE_MODEL_ID
+CAL_GRANITE_ENDPOINT_STYLE: str = _env("CAL_GRANITE_ENDPOINT_STYLE", "")
 GRANITE_TIMEOUT_S: float = float(_env("CAL_GRANITE_TIMEOUT_S", "30"))
 GRANITE_MAX_ATTEMPTS: int = int(_env("CAL_GRANITE_MAX_ATTEMPTS", "2"))
 GRANITE_IAM_URL: str = _env(
@@ -207,6 +213,21 @@ _STORAGE_KEYS: tuple[str, ...] = (
     "CAL_EXEC_5A",
     "CAL_EXEC_5B",
     "CAL_EXEC_5C",
+    "FIRMS_MAP_KEY",
+    "CAL_AI_PROVIDER",
+    "CAL_QWEN_ENABLED",
+    "CAL_QWEN_BASE_URL",
+    "CAL_QWEN_API_KEY",
+    "CAL_QWEN_MODEL",
+    "WATSONX_API_KEY",
+    "WATSONX_PROJECT_ID",
+    "WATSONX_URL",
+    "GRANITE_MODEL_ID",
+    "CAL_GRANITE_API_KEY",
+    "CAL_GRANITE_PROJECT_ID",
+    "CAL_GRANITE_BASE_URL",
+    "CAL_GRANITE_MODEL",
+    "CAL_GRANITE_ENDPOINT_STYLE",
 )
 
 _ENV_FOR_ATTR: dict[str, str] = {
@@ -215,6 +236,7 @@ _ENV_FOR_ATTR: dict[str, str] = {
     "CATALOG_PATH": "CAL_CATALOG_PATH",
     "OPS_DB_PATH": "CAL_OPS_DB_PATH",
     "BACKUP_ROOT": "CAL_BACKUP_ROOT",
+    "GRANITE_MODEL_ID": "WATSONX_MODEL_ID",
 }
 
 _SETTINGS_SNAPSHOT: dict[str, tuple[str, str | None]] = {

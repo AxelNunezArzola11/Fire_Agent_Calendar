@@ -11,9 +11,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from .. import settings
+from ..agents import providers as providers_mod
 from ..agents.granite import GraniteProvider
 from ..agents.providers import ProviderChain, QwenProvider
 from ..events import model, notify, qwen, store
+from ..processing import regions
 from . import event_report, frames, query
 
 KEY_EV_STATE = "cal_ev_state"
@@ -437,14 +439,52 @@ def _render_qwen(conn) -> None:
     from ..events import models as models_mod
 
     config = qwen.QwenConfig.from_settings()
-    status = config.status()
-    if status["available"]:
-        st.success(f"Qwen interpretation available ({status['reason']}).")
+    pstat = providers_mod.provider_status(qwen_config=config)
+    g_info = pstat["granite"]
+    q_info = pstat["qwen"]
+
+    ai_mode_options = ["auto", "granite", "qwen", "deterministic"]
+    if "cal_ai_provider_choice" not in st.session_state:
+        st.session_state["cal_ai_provider_choice"] = pstat["configured_mode"]
+    selected_mode = st.selectbox(
+        "AI provider mode",
+        options=ai_mode_options,
+        key="cal_ai_provider_choice",
+        format_func=lambda m: {
+            "auto": "Auto (Qwen -> IBM Granite -> Deterministic fallback)",
+            "granite": "IBM Granite (watsonx.ai / OpenAI-compatible)",
+            "qwen": "Qwen (OpenRouter / OpenAI-compatible)",
+            "deterministic": "Deterministic rules only (no external LLM)",
+        }[m],
+    )
+
+    c_q, c_g, c_d = st.columns(3)
+    with c_q:
+        st.caption(
+            f"**Qwen**: {'ready (' + q_info['model'] + ')' if q_info['available'] else 'unavailable (' + q_info['reason'] + ')'}"
+        )
+    with c_g:
+        st.caption(
+            f"**IBM Granite**: {'ready (' + g_info['model'] + ')' if g_info['available'] else 'unavailable (' + g_info['reason'] + ')'}"
+        )
+    with c_d:
+        st.caption("**Deterministic fallback**: ready (`deterministic-rules-v1`)")
+
+    effective_mode = selected_mode
+    if selected_mode == "auto":
+        effective_mode = pstat["effective_mode"]
+    if effective_mode == "granite" and g_info["available"]:
+        st.success(f"Active AI provider: **IBM Granite** (`{g_info['model']}`) with deterministic fallback.")
+    elif effective_mode == "qwen" and q_info["available"]:
+        st.success(f"Active AI provider: **Qwen** (`{q_info['model']}`) with IBM Granite / deterministic fallback.")
     else:
-        st.warning(f"Qwen interpretation unavailable: {status['reason']}. "
-                   "Deterministic explanations are shown instead. "
-                   "Scientific data and metrics are unaffected.")
-    with st.expander("Model discovery (OpenRouter catalog)"):
+        st.info(
+            "Active explanation mode: **Deterministic rules** "
+            "(reproducible rules & thresholds; no synthetic LLM claims). "
+            "Scientific data and metrics are unaffected."
+        )
+
+    with st.expander("Model discovery (OpenRouter Qwen catalog)"):
         st.caption("Discovers Qwen chat models available to the configured "
                    "API key (catalog + key check only — never a paid "
                    "completion). Paid models need explicit approval below.")
@@ -490,11 +530,8 @@ def _render_qwen(conn) -> None:
                             f"Catalog refreshed: "
                             f"{fresh.get('catalog_count', 0)} models.")
     effective, why = models_mod.effective_model(conn, config)
-    if effective:
-        st.caption(f"Explain will use: {effective} ({why}).")
-    else:
-        st.caption(f"No model selected ({why}); Explain uses the "
-                   f"deterministic fallback.")
+    if effective and selected_mode in ("auto", "qwen"):
+        st.caption(f"Qwen Explain model: {effective} ({why}).")
     options, truncated = _events_in_range(
         conn,
         st.session_state.get("cal_range_start", "2023-01-01"),
@@ -522,9 +559,7 @@ def _render_qwen(conn) -> None:
             target or alert_target):
         import dataclasses
 
-        # Discovered (or explicit) model override; validation, fallback,
-        # and Explain-only gating inside qwen.explain are unchanged.
-        run_config = dataclasses.replace(config, model=effective or "")
+        run_config = dataclasses.replace(config, model=effective or config.model or "")
         picked = (alert_target or "").strip() or (target or "").strip()
         clean = picked
         event = store.get_event(conn, clean)
@@ -534,13 +569,15 @@ def _render_qwen(conn) -> None:
                                        limit=50)
             payload = qwen.build_event_payload(event, linked)
             result = qwen.explain("event", event["event_id"], payload,
-                                  config=run_config, conn=conn)
+                                  config=run_config, ai_provider=selected_mode,
+                                  conn=conn)
         elif alert is not None:
             event = store.get_event(conn, alert["event_id"]) \
                 if alert.get("event_id") else None
             payload = qwen.build_alert_payload(alert, event)
             result = qwen.explain("alert", alert["alert_id"], payload,
-                                  config=run_config, conn=conn)
+                                  config=run_config, ai_provider=selected_mode,
+                                  conn=conn)
         else:
             st.warning(f"No event or alert with id {clean!r}.")
             return
@@ -550,24 +587,27 @@ def _render_qwen(conn) -> None:
                    + (", ".join(result["evidence_ids"])
                       or "none recorded"))
         if result["status"] != "ok":
-            st.caption(f"Qwen status: {result['status']} "
-                       f"({result['validation']}).")
+            st.caption(
+                f"Provider outcome: {result.get('provider', 'deterministic')} "
+                f"fallback ({result['status']}: {result['validation']})."
+            )
         elif result.get("latency_ms") is not None:
-            st.caption(f"Model {result['model']} · "
-                       f"{result['latency_ms']:.0f} ms · validated against "
-                       "supplied evidence.")
+            st.caption(
+                f"Provider {result.get('provider', 'ai')} · Model {result['model']} · "
+                f"{result['latency_ms']:.0f} ms · validated against supplied evidence."
+            )
         st.caption("AI text is an interpretation aid, never an official "
                    "assessment or authoritative fire report.")
         with st.expander("Validation receipt"):
-            st.caption("Guardrails applied to every Qwen answer "
+            st.caption("Guardrails applied to every AI answer "
                        "(failures fall back, never display).")
             for item in qwen.describe_checks():
                 st.write(f"- **{item['check']}**: {item['rule']}")
             st.write("This explanation:", result["status"], "—",
                      result["validation"])
             if result["status"] != "ok":
-                st.caption("Deterministic template: values copied from the "
-                           "evidence payload; no model inference ran.")
+                st.caption("Deterministic rules output: reproducible classifications "
+                           "computed strictly from the verified evidence payload.")
     st.divider()
     st.caption("For the full Start → End automated analysis with agent "
                "trace and CSV exports, open the Pipeline section above.")
@@ -845,13 +885,21 @@ def _render_pipeline(conn) -> None:
             saved=None)
     except aoi_mod.AoIError:
         pipe_bbox = None
+    aoi_mode = st.session_state.get(filters_mod.KEY_AOI_MODE, "full")
+    reg_id = st.session_state.get(filters_mod.KEY_AOI_REGION)
+    region_label = (
+        regions.region_label(reg_id)
+        if aoi_mode == "region" and reg_id
+        else ("Full 2023 USA Pilot" if not pipe_bbox else f"{aoi_mode} AOI")
+    )
     if pipe_bbox:
-        st.caption(f"Geographic filter active: lon {pipe_bbox[0]:.2f}…"
+        st.caption(f"Geographic filter active (**{region_label}**): lon {pipe_bbox[0]:.2f}…"
                    f"{pipe_bbox[2]:.2f}, lat {pipe_bbox[1]:.2f}…"
-                   f"{pipe_bbox[3]:.2f} (sidebar Area of interest).")
+                   f"{pipe_bbox[3]:.2f} (sidebar Geographic area of interest).")
     else:
         st.caption("Geographic filter: full pilot (USA). Set a sidebar "
-                   "Area of interest to restrict the run.")
+                   "Geographic area of interest (e.g. Brazil, Spain, Australia, "
+                   "California, or custom lat/lon/bbox) to restrict or fetch regionally.")
     st.caption("Date inputs follow the shared sidebar range until you "
                "edit them here.")
     col_a, col_b = st.columns(2)
@@ -862,29 +910,74 @@ def _render_pipeline(conn) -> None:
     with col_b:
         end = st.text_input("End Date", value="2023-08-16",
                             key="cal_pipe_end", placeholder="YYYY-MM-DD")
+    live_ds = st.session_state.get("cal_live_regional")
+    firms_ready = bool(settings.get_setting("FIRMS_MAP_KEY", ""))
+    default_live = bool(
+        pipe_bbox is not None
+        and live_ds is not None
+        and live_ds.bbox == pipe_bbox
+        and live_ds.date_start == (start or "").strip()
+        and live_ds.date_end == (end or "").strip()
+    )
+    use_live_firms = st.checkbox(
+        f"Acquire live NASA FIRMS observations for {region_label} (required outside USA 2023 archive)",
+        value=default_live,
+        key="cal_pipe_live_firms",
+        disabled=not firms_ready and live_ds is None,
+        help="Retrieves MODIS/VIIRS FIRMS Area API observations for the active bounding box "
+             "when FIRMS_MAP_KEY is configured."
+    )
+    if not firms_ready:
+        st.caption("NASA FIRMS API key (`FIRMS_MAP_KEY`) is not configured in this environment.")
+
     l2_match = st.checkbox(
         "Match Level-2 granules (needs network + Earthdata; "
         "ranges of 7 days or fewer)",
         value=False, key="cal_pipe_l2")
     qcfg = qwen.QwenConfig.from_settings()
     eff_model, eff_reason = models_mod.effective_model(conn, qcfg)
-    if eff_model:
-        st.caption(f"Qwen model: {eff_model} ({eff_reason}).")
-    else:
-        st.caption(f"Qwen unavailable: {eff_reason}.")
     granite = GraniteProvider()
     granite_ok, granite_reason = granite.available()
-    if granite_ok:
-        st.caption(f"IBM Granite fallback ready ({granite.model}).")
+
+    pipe_ai_mode = st.selectbox(
+        "Pipeline AI agent provider",
+        options=["auto", "granite", "qwen", "deterministic"],
+        index=["auto", "granite", "qwen", "deterministic"].index(
+            providers_mod.resolve_ai_provider_mode()
+        ),
+        key="cal_pipe_ai_provider",
+        format_func=lambda m: {
+            "auto": "Auto (Qwen -> IBM Granite -> Deterministic fallback)",
+            "granite": "IBM Granite (with deterministic fallback)",
+            "qwen": "Qwen (with deterministic fallback)",
+            "deterministic": "Deterministic rules only (no external LLM)",
+        }[m],
+    )
+    if pipe_ai_mode == "granite":
+        st.caption(
+            f"IBM Granite: {granite.model} (ready)." if granite_ok
+            else f"IBM Granite unavailable ({granite_reason}); agents will use deterministic fallback."
+        )
+    elif pipe_ai_mode == "qwen":
+        st.caption(
+            f"Qwen model: {eff_model} ({eff_reason})." if eff_model
+            else f"Qwen unavailable ({eff_reason}); agents will use deterministic fallback."
+        )
+    elif pipe_ai_mode == "deterministic":
+        st.caption("Deterministic rules mode active: reproducible rules cover all agents.")
     else:
-        st.caption(f"IBM Granite unavailable: {granite_reason}. "
-                   "Deterministic fallback covers all agents.")
+        st.caption(
+            (f"Qwen: {eff_model}; " if eff_model else f"Qwen unavailable ({eff_reason}); ")
+            + (f"IBM Granite ready ({granite.model})." if granite_ok else f"IBM Granite unavailable ({granite_reason}).")
+        )
+
     if st.button("Run Analysis", key="cal_pipe_go"):
         providers_list = []
-        if eff_model:
+        if pipe_ai_mode in ("auto", "qwen") and eff_model:
             providers_list.append(QwenProvider(
                 dataclasses.replace(qcfg, model=eff_model)))
-        providers_list.append(GraniteProvider())
+        if pipe_ai_mode in ("auto", "granite"):
+            providers_list.append(GraniteProvider())
         chain = ProviderChain(providers_list)
         box = st.status("Running pipeline…", expanded=True)
 
@@ -892,19 +985,34 @@ def _render_pipeline(conn) -> None:
             box.write(f"{name}: {state}"
                       + (f" — {detail}" if detail else ""))
 
+        extra_kw: dict = {}
+        clean_start = (start or "").strip()
+        clean_end = (end or "").strip()
+        if use_live_firms:
+            if (
+                live_ds is not None
+                and (pipe_bbox is None or live_ds.bbox == pipe_bbox)
+                and live_ds.date_start == clean_start
+                and live_ds.date_end == clean_end
+            ):
+                extra_kw["live_dataset"] = live_ds
+            else:
+                extra_kw["fetch_live_firms"] = True
+            extra_kw["region_label"] = region_label
+        elif pipe_bbox:
+            extra_kw["region_label"] = region_label
+
         try:
             fresh = pipe_runner.run_pipeline(
-                (start or "").strip(), (end or "").strip(),
+                clean_start, clean_end,
                 events_conn=conn, chain=chain, progress=_progress,
-                l2_match=bool(l2_match), bbox=pipe_bbox)
+                l2_match=bool(l2_match), bbox=pipe_bbox, **extra_kw)
         except ValueError as exc:
             box.update(label="Pipeline rejected the input", state="error")
             st.error(str(exc))
             return
         box.update(label=f"Pipeline finished ({fresh.execution_id})",
                    state="complete", expanded=False)
-        # Persist the completed run: downloads and reruns reuse these
-        # bytes without recomputing acquisition or agent calls.
         st.session_state["cal_pipe_result"] = fresh
         st.session_state["cal_pipe_result_range"] = (
             fresh.date_start, fresh.date_end)

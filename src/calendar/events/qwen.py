@@ -48,7 +48,10 @@ from . import store as store_mod
 logger = logging.getLogger(__name__)
 
 AI_LABEL = "AI-generated interpretation (Qwen)"
+GRANITE_AI_LABEL = "AI-generated interpretation (IBM Granite)"
 FALLBACK_LABEL = "Deterministic explanation (Qwen unavailable)"
+GRANITE_FALLBACK_LABEL = "Deterministic explanation (IBM Granite unavailable)"
+DETERMINISTIC_LABEL = "Deterministic explanation (rule-based)"
 
 REQUIRED_KEYS = ("summary", "evidence_used", "uncertainty", "limitations")
 
@@ -80,11 +83,15 @@ class QwenConfig:
 
     @classmethod
     def from_settings(cls) -> "QwenConfig":
+        enabled_raw = settings.get_setting("CAL_QWEN_ENABLED", "false")
+        base_url = settings.get_setting("CAL_QWEN_BASE_URL", "").rstrip("/")
+        api_key = settings.get_setting("CAL_QWEN_API_KEY", "")
+        model = settings.get_setting("CAL_QWEN_MODEL", "")
         return cls(
-            enabled=settings.CAL_QWEN_ENABLED.lower() == "true",
-            base_url=settings.CAL_QWEN_BASE_URL.rstrip("/"),
-            api_key=settings.CAL_QWEN_API_KEY,
-            model=settings.CAL_QWEN_MODEL,
+            enabled=enabled_raw.lower() == "true",
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
             timeout_s=settings.CAL_QWEN_TIMEOUT_S,
         )
 
@@ -348,8 +355,10 @@ def validate_response(parsed: dict, payload: dict) -> dict:
 
 
 def deterministic_fallback(kind: str, payload: dict) -> str:
-    """Template explanation used whenever Qwen is unusable (English)."""
+    """Deterministic rule-based explanation used when LLMs are absent or fail."""
     if kind == "event":
+        n_anom = len(payload.get("anomalies") or [])
+        n_refs = len(payload.get("anomaly_refs") or [])
         lines = [
             f"Event {payload.get('event_id')} "
             f"({payload.get('lifecycle_state')}, "
@@ -377,6 +386,13 @@ def deterministic_fallback(kind: str, payload: dict) -> str:
                 + ".")
         else:
             lines.append("No alerts are attached to this event.")
+        lines.append(
+            "Rules applied: "
+            f"RULE_LIFECYCLE_STATE={payload.get('lifecycle_state')}; "
+            f"RULE_SEVERITY_SIGNAL={payload.get('severity')}; "
+            "RULE_FRP_SEPARATION=MODIS/VIIRS kept separate (missing FRP never zeroed); "
+            f"RULE_ANOMALY_LINKAGE={max(n_anom, n_refs)} anomaly ref(s)."
+        )
     else:
         lines = [
             f"Alert {payload.get('alert_id')} "
@@ -394,6 +410,13 @@ def deterministic_fallback(kind: str, payload: dict) -> str:
                          f"({event['lifecycle_state']}).")
         else:
             lines.append("Pilot-wide alert: no single event is implicated.")
+        lines.append(
+            "Rules applied: "
+            f"RULE_ALERT_TYPE={payload.get('alert_type')}; "
+            f"RULE_SEVERITY_SIGNAL={payload.get('severity')}; "
+            f"RULE_STATUS={payload.get('status')}; "
+            f"RULE_VERSION={payload.get('rule_version') or 'default'}."
+        )
     lines.append("Limitations: " + " ".join(payload.get("limitations", [])))
     return "\n".join(lines)
 
@@ -417,28 +440,65 @@ def http_transport(prompt: str, config: QwenConfig) -> str:
     return data["choices"][0]["message"]["content"]
 
 
+def _parse_and_validate_ai_json(raw: str, payload: dict) -> tuple[dict | None, str]:
+    try:
+        clean = re.sub(r"```(?:json)?|```", "", raw).strip()
+        parsed = json.loads(clean)
+    except (ValueError, AttributeError):
+        return None, f"unparseable response: {str(raw)[:200]}"
+    verdict = validate_response(parsed, payload)
+    if not verdict["valid"]:
+        return None, verdict["reason"]
+    return parsed, verdict["reason"]
+
+
+def _format_ai_sections(parsed: dict) -> str:
+    return "\n".join([
+        parsed["summary"],
+        "",
+        "Evidence used: " + ", ".join(parsed["evidence_used"]) + ".",
+        "Uncertainty: " + " ".join(parsed["uncertainty"]),
+        "Limitations: " + " ".join(parsed["limitations"]),
+    ])
+
+
 def explain(kind: str, target_id: str, payload: dict, *,
             config: QwenConfig | None = None,
             transport=http_transport,
-            conn=None) -> dict:
-    """Explain one event/alert with Qwen, or fall back deterministically.
+            conn=None,
+            ai_provider: str | None = None,
+            granite_config=None,
+            granite_post=None) -> dict:
+    """Explain one event/alert with Qwen or IBM Granite, or fall back deterministically.
 
     Never raises for transport/validation failures: those return a
     fallback result (status != "ok") and are recorded in qwen_log when a
     connection is supplied. Returns {status, label, text, model,
-    latency_ms, validation, evidence_ids}.
+    provider, latency_ms, validation, evidence_ids}.
     """
     if kind not in ("event", "alert"):
         raise ValueError(f"unknown explanation kind {kind!r}")
+    config_supplied = config is not None
     config = config or QwenConfig.from_settings()
     status = config.status()
     evidence_ids = sorted(_payload_ids(payload))
     fallback_text = deterministic_fallback(kind, payload)
 
+    mode = (ai_provider or "").strip().lower()
+    if not mode:
+        if config_supplied:
+            mode = "qwen"
+        else:
+            env_mode = settings.get_setting("CAL_AI_PROVIDER", "auto").strip().lower()
+            mode = env_mode if env_mode in ("auto", "granite", "qwen", "deterministic") else "auto"
+
     def _result(state: str, label: str, text: str, validation: str,
-                latency_ms: float | None = None) -> dict:
+                latency_ms: float | None = None,
+                *, model_name: str = "", provider_name: str = "deterministic") -> dict:
         result = {"status": state, "label": label, "text": text,
-                  "model": config.model if state == "ok" else "",
+                  "model": model_name if state == "ok" else "",
+                  "provider": provider_name if state == "ok" else "deterministic",
+                  "requested_provider": mode,
                   "latency_ms": latency_ms, "validation": validation,
                   "evidence_ids": evidence_ids}
         if conn is not None:
@@ -446,43 +506,102 @@ def explain(kind: str, target_id: str, payload: dict, *,
                 store_mod.append_qwen_log(
                     conn, target_type=kind, target_id=target_id,
                     status=state, latency_ms=latency_ms,
-                    model=config.model if state == "ok" else "",
+                    model=model_name if state == "ok" else "",
                     error="" if state == "ok" else validation[:500])
             except Exception as exc:  # noqa: BLE001 - logging never breaks
-                logger.error("qwen log failure: %s", str(exc)[:200])
+                logger.error("ai log failure: %s", str(exc)[:200])
         return result
 
-    if not status["available"]:
-        return _result("disabled", FALLBACK_LABEL, fallback_text,
-                       status["reason"])
+    if mode == "deterministic":
+        return _result("deterministic", DETERMINISTIC_LABEL, fallback_text,
+                       "deterministic rules mode enabled",
+                       provider_name="deterministic")
+
     prompt = ("EVIDENCE (JSON, authoritative):\n"
               + json.dumps(payload, sort_keys=True, default=str))
-    started = time.monotonic()
-    try:
-        raw = transport(prompt, config)
-    except Exception as exc:  # noqa: BLE001 - any transport failure
-        message = str(exc)[:200].lower()
-        state = "timeout" if "timeout" in message or "timed out" in message \
-            else "error"
-        logger.warning("qwen %s for %s: %s", state, target_id, str(exc)[:200])
-        return _result(state, FALLBACK_LABEL, fallback_text,
-                       f"{state}: {str(exc)[:200]}",
-                       (time.monotonic() - started) * 1000.0)
-    latency_ms = (time.monotonic() - started) * 1000.0
-    try:
-        clean = re.sub(r"```(?:json)?|```", "", raw).strip()
-        parsed = json.loads(clean)
-    except (ValueError, AttributeError):
-        return _result("invalid", FALLBACK_LABEL, fallback_text,
-                       f"unparseable response: {raw[:200]}", latency_ms)
-    verdict = validate_response(parsed, payload)
-    if not verdict["valid"]:
-        logger.warning("qwen invalid for %s: %s", target_id, verdict["reason"])
-        return _result("invalid", FALLBACK_LABEL, fallback_text,
-                       verdict["reason"], latency_ms)
-    sections = [parsed["summary"], "",
-                "Evidence used: " + ", ".join(parsed["evidence_used"]) + ".",
-                "Uncertainty: " + " ".join(parsed["uncertainty"]),
-                "Limitations: " + " ".join(parsed["limitations"])]
-    return _result("ok", AI_LABEL, "\n".join(sections),
-                   verdict["reason"], latency_ms)
+
+    def _run_qwen():
+        if not status["available"]:
+            return _result("disabled", FALLBACK_LABEL, fallback_text,
+                           status["reason"], provider_name="qwen")
+        started = time.monotonic()
+        try:
+            raw = transport(prompt, config)
+        except Exception as exc:  # noqa: BLE001 - any transport failure
+            message = str(exc)[:200].lower()
+            state = "timeout" if "timeout" in message or "timed out" in message \
+                else "error"
+            logger.warning("qwen %s for %s: %s", state, target_id, str(exc)[:200])
+            return _result(state, FALLBACK_LABEL, fallback_text,
+                           f"{state}: {str(exc)[:200]}",
+                           (time.monotonic() - started) * 1000.0,
+                           provider_name="qwen")
+        latency_ms = (time.monotonic() - started) * 1000.0
+        parsed, reason = _parse_and_validate_ai_json(raw, payload)
+        if parsed is None:
+            if "banned claim" in reason or "unsupported" in reason or "untraceable" in reason:
+                logger.warning("qwen invalid for %s: %s", target_id, reason)
+            return _result("invalid", FALLBACK_LABEL, fallback_text,
+                           reason, latency_ms, provider_name="qwen")
+        return _result("ok", AI_LABEL, _format_ai_sections(parsed),
+                       reason, latency_ms,
+                       model_name=config.model, provider_name="qwen")
+
+    def _run_granite():
+        from ..agents import granite as granite_mod
+
+        gp = granite_mod.GraniteProvider(config=granite_config, post=granite_post)
+        usable, reason = gp.available()
+        if not usable:
+            return _result("disabled", GRANITE_FALLBACK_LABEL, fallback_text,
+                           reason, provider_name="granite")
+        attempt = gp.complete(prompt, SYSTEM_PROMPT)
+        if not attempt.ok:
+            state = "timeout" if "timeout" in (attempt.error or "").lower() else "error"
+            return _result(state, GRANITE_FALLBACK_LABEL, fallback_text,
+                           attempt.error or "granite request failed",
+                           attempt.latency_ms, provider_name="granite")
+        parsed, val_reason = _parse_and_validate_ai_json(attempt.text, payload)
+        if parsed is None:
+            logger.warning("granite invalid for %s: %s", target_id, val_reason)
+            return _result("invalid", GRANITE_FALLBACK_LABEL, fallback_text,
+                           val_reason, attempt.latency_ms, provider_name="granite")
+        return _result("ok", GRANITE_AI_LABEL, _format_ai_sections(parsed),
+                       val_reason, attempt.latency_ms,
+                       model_name=gp.model, provider_name="granite")
+
+    if mode == "granite":
+        return _run_granite()
+    if mode == "qwen":
+        return _run_qwen()
+
+    # mode == "auto": try Qwen when configured; otherwise fail over to IBM Granite,
+    # then deterministic rules. Preserve Qwen failure logging only if Qwen was tried
+    # and Granite is also unavailable.
+    if status["available"]:
+        qwen_res = _result_q = None
+        started = time.monotonic()
+        try:
+            raw = transport(prompt, config)
+            latency_ms = (time.monotonic() - started) * 1000.0
+            parsed, reason = _parse_and_validate_ai_json(raw, payload)
+            if parsed is not None:
+                return _result("ok", AI_LABEL, _format_ai_sections(parsed),
+                               reason, latency_ms,
+                               model_name=config.model, provider_name="qwen")
+            qwen_err = reason
+        except Exception as exc:  # noqa: BLE001
+            qwen_err = f"{type(exc).__name__}: {str(exc)[:160]}"
+        granite_res = _run_granite()
+        if granite_res["status"] == "ok":
+            return granite_res
+        return _result("error", FALLBACK_LABEL, fallback_text,
+                       f"qwen failed ({qwen_err}); granite: {granite_res['validation']}",
+                       provider_name="deterministic")
+
+    granite_res = _run_granite()
+    if granite_res["status"] == "ok":
+        return granite_res
+    return _result("disabled", FALLBACK_LABEL, fallback_text,
+                   f"qwen: {status['reason']}; granite: {granite_res['validation']}",
+                   provider_name="deterministic")

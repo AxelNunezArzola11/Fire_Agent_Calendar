@@ -180,17 +180,118 @@ class ProviderChain:
         return tuple(attempts)
 
 
-def default_chain() -> ProviderChain:
-    """Production chain: Qwen first, Granite fallback (Qwen-only if the
-    Granite module cannot load, with the reason logged)."""
+class DeterministicProvider(Provider):
+    """Explicit deterministic-rules backend (never calls an external LLM).
+
+    Signals the runner to skip external inference cleanly and produce an
+    auditable rule-based response with deterministic classifications.
+    """
+
+    name = "deterministic"
+
+    def available(self) -> tuple[bool, str]:
+        return True, "deterministic rules enabled"
+
+    @property
+    def model(self) -> str:
+        return "deterministic-rules-v1"
+
+    def complete(self, prompt: str, system: str) -> Attempt:
+        _ = (prompt, system)
+        return Attempt(self.name, self.model, False, 0.0,
+                       error="deterministic mode selected (no external LLM)")
+
+
+def resolve_ai_provider_mode(mode: str | None = None) -> str:
+    """Resolve requested AI provider mode ('auto'|'granite'|'qwen'|'deterministic')."""
+    raw = (
+        mode
+        if mode is not None
+        else settings.get_setting("CAL_AI_PROVIDER", "auto")
+    )
+    cleaned = str(raw or "auto").strip().lower()
+    if cleaned in ("auto", "granite", "qwen", "deterministic"):
+        return cleaned
+    return "auto"
+
+
+def _load_granite_provider():
+    from . import granite as granite_mod
+
+    return granite_mod.GraniteProvider()
+
+
+def provider_status(mode: str | None = None, *, qwen_config=None) -> dict:
+    """Structured availability status for AI providers (never exposes secrets)."""
     import logging as _logging
 
-    providers: list = [QwenProvider()]
-    try:
-        from . import granite as granite_mod
+    selected = resolve_ai_provider_mode(mode)
+    qwen_provider = QwenProvider(config=qwen_config)
+    qwen_ok, qwen_reason = qwen_provider.available()
 
-        providers.append(granite_mod.GraniteProvider())
-    except Exception as exc:  # noqa: BLE001 - optional provider
+    granite_ok, granite_reason, granite_model = False, "unavailable", ""
+    try:
+        gp = _load_granite_provider()
+        granite_ok, granite_reason = gp.available()
+        granite_model = gp.model
+    except Exception as exc:  # noqa: BLE001
         _logging.getLogger(__name__).warning(
             "granite provider unavailable: %s", type(exc).__name__)
-    return ProviderChain(providers)
+        granite_reason = f"load failed: {type(exc).__name__}"
+
+    if selected == "deterministic":
+        effective = "deterministic"
+    elif selected == "granite":
+        effective = "granite" if granite_ok else "deterministic"
+    elif selected == "qwen":
+        effective = "qwen" if qwen_ok else "deterministic"
+    else:
+        if qwen_ok:
+            effective = "qwen"
+        elif granite_ok:
+            effective = "granite"
+        else:
+            effective = "deterministic"
+
+    return {
+        "configured_mode": selected,
+        "effective_mode": effective,
+        "deterministic": {"available": True, "model": "deterministic-rules-v1"},
+        "qwen": {
+            "available": qwen_ok,
+            "reason": qwen_reason,
+            "model": qwen_provider.model,
+        },
+        "granite": {
+            "available": granite_ok,
+            "reason": granite_reason,
+            "model": granite_model,
+        },
+    }
+
+
+def default_chain(mode: str | None = None, *, qwen_config=None) -> ProviderChain:
+    """Configured provider chain honoring CAL_AI_PROVIDER.
+
+    - ``auto`` (default): Qwen first, IBM Granite fallback (Qwen-only if
+      the Granite module cannot load, with the reason logged).
+    - ``granite``: IBM Granite first.
+    - ``qwen``: Qwen first.
+    - ``deterministic``: no external LLM providers (immediate deterministic rules).
+    """
+    import logging as _logging
+
+    selected = resolve_ai_provider_mode(mode)
+    if selected == "deterministic":
+        return ProviderChain([])
+
+    providers_list: list = []
+    if selected in ("auto", "qwen"):
+        providers_list.append(QwenProvider(config=qwen_config))
+    if selected in ("auto", "granite"):
+        try:
+            providers_list.append(_load_granite_provider())
+        except Exception as exc:  # noqa: BLE001 - optional provider
+            _logging.getLogger(__name__).warning(
+                "granite provider unavailable: %s", type(exc).__name__)
+    return ProviderChain(providers_list)
